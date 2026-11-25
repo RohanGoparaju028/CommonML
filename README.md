@@ -1,187 +1,125 @@
-# Axiom
+# Argon (CommonML Compiler & VM)
 
-Axiom 0.1.0 is an experimental, strongly typed language for building native programs. It takes inspiration from Lean and uses `.ax` source files, an `Axiom.toml` manifest, and the `axiom` command. The compiler produces C++17 and uses Clang or GCC to build programs.
+CommonML (`cml`) is a statically typed, Hindley-Milner functional programming language implemented in C++20 with algebraic data types, pattern matching, hygienic AST macros (`quote` / `$`), a bytecode compiler, a stack-based VM with closures and tail-call optimization, and an interactive REPL.
 
-```text
-let add (left right : i32) := left + right;
-let main := println(add(20, 22));
-```
+## Features
 
-This program prints `42`. `let add` defines a function and `let main` declares the entry point. Parameters have explicit types; results are inferred. Axiom is early software and does not include Lean’s proof system or dependent types. See [current capabilities and limits](docs/status.md).
+- **Hindley-Milner Type Inference**: Automatic type inference with occurs check, `let`-polymorphism, and optional type annotations.
+- **Algebraic Data Types & Pattern Matching**: Polymorphic and recursive `type` declarations, curried constructors, and `match ... with` destructuring for literals, tuples, lists, cons (`::`), and ADTs.
+- **First-Class Curried Functions**: Closures with lexical upvalues, `let rec` recursion, pipe-forward (`|>`), and tail-call optimization (`TailCall`).
+- **Hygienic Macros**: Compile-time `macro` definitions using `quote { ... }` and `$` / `$(...)` splicing, backed by Flatt-style sets-of-scopes (`ScopeId`) hygiene to prevent variable capture.
+- **Bytecode Compiler & Stack VM**: Compiles expanded, typechecked ASTs to a compact bytecode instruction set with a disassembler (`--bc` / `:bc`).
+- **CLI & Interactive REPL**: Run `.cml` scripts, evaluate inline expressions (`-e`), inspect tokens/AST/types/bytecode, or explore interactively in the REPL.
 
-## Install
+## Building & Testing
 
-The release archives below install the compiler directly. Keep a C++17-capable Clang or GCC toolchain installed to build your programs. To build Axiom itself from source, you also need Git, CMake 3.16 or newer, and Make or Ninja.
-
-Download a ready-to-run compiler archive for [Linux x86_64](https://github.com/RohanGoparaju028/Axiom/releases/download/v0.1.0/axiom-0.1.0-linux-x86_64.zip), [macOS ARM64](https://github.com/RohanGoparaju028/Axiom/releases/download/v0.1.0/axiom-0.1.0-macos-arm64.zip), or [Windows x86_64](https://github.com/RohanGoparaju028/Axiom/releases/download/v0.1.0/axiom-0.1.0-windows-x86_64.zip) from the [Axiom 0.1.0 release](https://github.com/RohanGoparaju028/Axiom/releases/tag/v0.1.0). Extract the archive and add its `bin` directory to `PATH`. Building applications still requires Clang or GCC; Windows users can install the UCRT64 toolchain described in the [installation guide](docs/installation.md).
-
-To build Axiom from source on macOS or Linux, install the prerequisites first:
+Requires CMake 3.16+ and a C++20 compiler.
 
 ```sh
-git clone https://github.com/RohanGoparaju028/Axiom.git Axiom
-cd Axiom
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-cmake --install build --prefix "$HOME/.local"
-export PATH="$HOME/.local/bin:$PATH"
-axiom --version
-axiom doctor
+cmake -S . -B build
+cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
-The GitHub repository has moved to Axiom. If you already have a checkout, start with the CMake commands in that directory. Add the `export PATH` line to your shell configuration to make it persistent. The build also provides `axiomc`, which accepts the same commands.
+## Quick Start
 
-For prerequisite installation and platform-specific setup, including Windows through MSYS2 UCRT64, follow the [installation guide](docs/installation.md). Tagged releases publish tested archives for macOS, Linux, and Windows; see [0.1.0 release notes](CHANGELOG.md). To try Axiom without installing it, run `./build/axiom run examples/lean.ax` from the repository.
-
-## Write your first project
-
-With `axiom` on your PATH, open the directory where you keep your projects and run:
+### Evaluate Inline Code
 
 ```sh
-mkdir hello-axiom
-cd hello-axiom
-axiom mod init hello-axiom
-mkdir src
-cat > src/main.ax <<'AX'
-let main := println("Hello from Axiom!");
-AX
-axiom run
+./build/commonml -e '
+let rec fib n =
+  if n <= 1 then n else fib (n - 1) + fib (n - 2)
+fib 10
+'
+# Output: 55
 ```
 
-Output:
-
-```text
-Hello from Axiom!
-```
-
-These commands use Bash/zsh syntax; they also work in the Windows UCRT64 Bash terminal. You can create `src/main.ax` in an editor instead.
-
-`axiom mod init` creates **only the manifest**. It preserves your existing files. For a starter project with source files already generated, use `axiom new hello-axiom` instead; the destination must not exist.
-
-The manifest for this project is:
-
-```toml
-[project]
-schema = 1
-name = "hello-axiom"
-entry = "src/main.ax"
-
-[dependencies]
-```
-
-Write a simple entry point as `let main := expression;`. `main` takes no parameters. An effect-only body, such as the `println` above, exits successfully. Returning an `i32` supplies the process exit status.
-
-## Check, build, and run
-
-Run these commands from your project directory:
-
-| Command | What it does |
-| --- | --- |
-| `axiom check` | Check Axiom types and evaluate global compile-time `test` blocks |
-| `axiom run` | Build and run the project |
-| `axiom build` | Produce a native executable |
-| `axiom build --debug` | Build with debug information |
-| `axiom get` | Restore dependencies pinned in the manifest |
-| `axiom emit-cpp --stdout` | Show the generated C++ |
-
-For `hello-axiom`, the release executable is `axiom-cxx/release/hello-axiom` (`hello-axiom.exe` on Windows). Debug builds go in `axiom-cxx/debug/`. `run` rebuilds before executing. `check` does not compile or link native C++ bindings.
-
-You can also run a single file without creating a manifest:
+### Algebraic Data Types & Pipelines
 
 ```sh
-axiom run hello.ax
+./build/commonml -e '
+type Option a = None | Some a
+
+let unwrap_or d opt =
+  match opt with
+  | None -> d
+  | Some x -> x
+
+let safe_div a b =
+  if b == 0 then None else Some (a / b)
+
+safe_div 84 2 |> unwrap_or 0
+'
+# Output: 42
 ```
 
-Ignore generated files in version control:
-
-```gitignore
-.axiom/
-axiom-cxx/
-```
-
-Commit your `.ax` source files and `Axiom.toml`.
-
-## Learn the language
-
-Replace `src/main.ax` with this complete example:
-
-```text
-inductive Outcome where
-    | Success (value : i32)
-    | Failure (message : string);
-
-let describe (result : Outcome) := match result with
-    | Outcome::Success(value) => "answer: " + str(value)
-    | Outcome::Failure(message) => message;
-
-let double (value : i32) := value * 2;
-let total := double(10);
-let main := println(describe(Outcome::Success(total)));
-```
-
-Run `axiom run`; it prints `answer: 20`.
-
-- `let name (parameters) := expression;` defines a named function; `fun` creates a closure. `def` remains useful for explicit brace bodies and recursive functions.
-- `let name := value` is immutable. Use `let mut` when you need assignment.
-- `inductive` defines a tagged union; `match` checks that all variants are covered.
-- `0..5` includes 0 through 4. Blocks use braces and calls use parentheses.
-- A function's final expression is its result. Recursive functions require an explicit result type.
-
-For a local module, create `src/math.ax`:
-
-```text
-pub let double (value : i32) := value * 2;
-```
-
-Then use it from `src/main.ax`:
-
-```text
-import math;
-let main := println(math.double(21));
-```
-
-`pub` makes a declaration available to importing modules. This program prints `42`.
-
-Continue with the [Lean-inspired language guide](docs/lean-inspired.md), [memory and collections](docs/memory.md), and [runnable examples](examples/README.md). Existing `fn` syntax remains supported; legacy `let x = value` is mutable, unlike `let x := value`.
-
-## Add dependencies
-
-Axiom fetches libraries from Git repositories. Replace the example URL below with an actual Axiom library repository:
+### Hygienic Macros
 
 ```sh
-axiom get https://github.com/your-team/math.git --name math
-# Select a tag, branch, or commit explicitly:
-axiom get https://github.com/your-team/math.git --name math --rev v1.0.0
+./build/commonml -e '
+macro with_temp v body =
+  quote {
+    let x = $v + 1 in
+    $body + x
+  }
+
+let x = 100
+with_temp!(5, x)
+'
+# Output: 106 (caller x is not captured by macro-local x)
 ```
 
-A local Git repository also works:
+### Start the REPL
 
 ```sh
-axiom get ../math --name math
+./build/commonml
 ```
 
-The repository must contain `Axiom.toml` pointing to its library entry, or a `src/lib.ax` / `lib.ax` file. If it exports `pub def double`, you can use the same `import math;` program shown above. Remove a local `src/math.ax` when switching to the dependency: local modules take precedence.
+REPL commands include `:type <expr>`, `:ast`, `:bc`, `:reset`, `:help`, and `:quit`.
 
-`get` records the exact commit in `Axiom.toml` and downloads sources into `.axiom/deps/`. After cloning an application, run `axiom get` to restore its pinned dependencies, including transitive dependencies, then `axiom run`. Builds use the cache without fetching over the network.
+## Project Layout
 
-There is no package registry or semantic-version range resolver yet. Local Git paths are recorded as absolute paths; use remote URLs for shared projects. See [modules and dependencies](docs/modules.md) for library authoring and updates.
+```text
+include/cml/
+  source.hpp          Source spans & formatted diagnostics
+  token.hpp           Token definitions
+  lexer.hpp           Lexer interface
+  ast.hpp             AST nodes, ScopeId, ScopeEnv
+  parser.hpp          Recursive-descent & Pratt parser
+  type.hpp            Type representation, substitutions, unification API
+  typecheck.hpp       Hindley-Milner type checker
+  value.hpp           Runtime value representation
+  builtins.hpp        Built-in function definitions
+  bytecode.hpp        Bytecode opcodes, Chunk, FunctionProto, disassembler
+  compiler.hpp        Bytecode compiler
+  vm.hpp              Stack-based bytecode VM
+  macro_expander.hpp  Hygienic macro expander
+  pipeline.hpp        End-to-end compilation & execution pipeline
+  repl.hpp            Interactive REPL
 
-## Editors and native libraries
+src/
+  source.cpp, lexer.cpp, ast.cpp, parser.cpp
+  types/              type.cpp, unify.cpp, typecheck_env.cpp, typecheck_pat.cpp, typecheck_expr.cpp
+  runtime/            value.cpp, builtins.cpp
+  bytecode/           bytecode.cpp
+  codegen/            compiler_state.cpp, compiler_pat.cpp, compiler_expr.cpp
+  vm/                 vm.cpp, vm_ops.cpp
+  macro/              macro_expander.cpp
+  driver/             pipeline.cpp, repl.cpp
+  main.cpp
 
-Set up [VS Code](docs/vscode.md) or [Vim/Neovim](docs/vim.md) for `.ax` highlighting, checks, run commands, and native debugging. Axiom does not yet provide a language server.
+tests/
+  test_framework.hpp
+  test_lexer_parser.cpp
+  test_typecheck.cpp
+  test_macros.cpp
+  test_vm.cpp
+  test_main.cpp
+```
 
-For existing C++ libraries, `axiom new native-demo --cpp` creates an integration example. Native calls use an explicit `unsafe` boundary. See [C++ integration](docs/cpp.md); ordinary Axiom programs can use the language without writing C++.
+## Documentation
 
-## More documentation
-
-- [0.1.0 release notes](CHANGELOG.md)
-- [Download Axiom 0.1.0 for Linux, macOS, or Windows](https://github.com/RohanGoparaju028/Axiom/releases/tag/v0.1.0)
-- [Getting started](docs/getting-started.md) and [installation](docs/installation.md)
-- [Modules and dependencies](docs/modules.md) and [build configuration](docs/build.md)
-- [Language reference](docs/language.md) and [keywords](docs/keywords.md)
-- [Current status and limitations](docs/status.md)
-
-To test the compiler itself, run `ctest --test-dir build --output-on-failure` from its repository after building.
-
-## Migrating older projects
-
-Axiom replaces the ArgsML and Argon names. Rename `ArgsML.toml` or `Argon.toml` to `Axiom.toml`, rename `.argsml` source files to `.ax`, and update the manifest's entry path. Use `axiom` (or `axiomc`) and the `axiom` editor settings. `.ar` and `.fe` remain readable as legacy extensions.
+- [Language Reference](docs/language.md)
+- [Hygienic Macros](docs/macros.md)
+- [Compiler & VM Architecture](docs/architecture.md)
+- [CLI & REPL Guide](docs/cli-repl.md)

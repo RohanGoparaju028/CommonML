@@ -1,68 +1,53 @@
 cmake_minimum_required(VERSION 3.16)
-project(Axiom VERSION 0.1.0 LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
+project(commonml VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime.hpp" AXIOM_RUNTIME)
-configure_file(src/embedded.hpp.in generated/embedded.hpp @ONLY)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/runtime.hpp)
-add_executable(axiomc src/main.cpp src/frontend.cpp src/compiler.cpp src/project.cpp)
-target_include_directories(axiomc PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
 if(MSVC)
-  target_compile_options(axiomc PRIVATE /W4)
+    add_compile_options(/W4)
 else()
-  target_compile_options(axiomc PRIVATE -Wall -Wextra -Wpedantic)
+    add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
-add_custom_command(TARGET axiomc POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:axiomc> $<TARGET_FILE_DIR:axiomc>/axiom${CMAKE_EXECUTABLE_SUFFIX})
-include(CTest)
-if(BUILD_TESTING)
-  add_executable(axiom_runtime_tests tests/runtime.cpp)
-  target_include_directories(axiom_runtime_tests PRIVATE src)
-  # These tests deliberately use assert(), including in Release builds.
-  if(MSVC)
-    target_compile_options(axiom_runtime_tests PRIVATE /UNDEBUG)
-  else()
-    target_compile_options(axiom_runtime_tests PRIVATE -UNDEBUG)
-  endif()
-  add_test(NAME reference_counted_runtime COMMAND axiom_runtime_tests)
-  add_test(NAME language_and_projects COMMAND ${CMAKE_COMMAND}
-    -DCOMPILER=$<TARGET_FILE:axiomc> -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}
-    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tests -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration.cmake)
-  add_test(NAME module_dependencies COMMAND ${CMAKE_COMMAND}
-    -DCOMPILER=$<TARGET_FILE_DIR:axiomc>/axiom${CMAKE_EXECUTABLE_SUFFIX}
-    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tests -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/modules.cmake)
-  add_test(NAME lean_inspired_language COMMAND ${CMAKE_COMMAND}
-    -DCOMPILER=$<TARGET_FILE:axiomc> -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}
-    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tests -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lean-inspired.cmake)
-  add_test(NAME native_project_layout COMMAND ${CMAKE_COMMAND}
-    -DCOMPILER=$<TARGET_FILE:axiomc> -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tests
-    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/native-layout.cmake)
-endif()
-find_program(AXIOM_NODE node)
-if(BUILD_TESTING AND AXIOM_NODE)
-  add_test(NAME vscode_commands COMMAND ${AXIOM_NODE} --test ${CMAKE_CURRENT_SOURCE_DIR}/editors/vscode/test/tools.test.js)
-endif()
-find_program(AXIOM_VIM vim)
-if(BUILD_TESTING AND AXIOM_VIM)
-  add_test(NAME vim_support COMMAND ${AXIOM_VIM} -Nu NONE -n -es -V1 -S ${CMAKE_CURRENT_SOURCE_DIR}/tests/editors.vim)
-  set_tests_properties(vim_support PROPERTIES ENVIRONMENT "AXIOM_EDITOR_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/editors/vim;AXIOM_COMPILER=$<TARGET_FILE:axiomc>;AXIOM_EXAMPLE=${CMAKE_CURRENT_SOURCE_DIR}/examples/axiom.ax")
-endif()
-find_program(AXIOM_NVIM nvim)
-if(BUILD_TESTING AND AXIOM_NVIM)
-  add_test(NAME neovim_support COMMAND ${AXIOM_NVIM} --headless -u NONE -n -S ${CMAKE_CURRENT_SOURCE_DIR}/tests/editors.vim)
-  set_tests_properties(neovim_support PROPERTIES ENVIRONMENT "AXIOM_EDITOR_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/editors/vim;AXIOM_COMPILER=$<TARGET_FILE:axiomc>;AXIOM_EXAMPLE=${CMAKE_CURRENT_SOURCE_DIR}/examples/axiom.ax")
-endif()
-find_program(AXIOM_LLDB lldb)
-if(BUILD_TESTING AND AXIOM_LLDB AND NOT WIN32)
-  add_test(NAME native_debug_symbols COMMAND ${CMAKE_COMMAND} -DCOMPILER=$<TARGET_FILE:axiomc>
-    -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR} -DWORK=${CMAKE_CURRENT_BINARY_DIR}
-    -DLLDB=${AXIOM_LLDB} -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/debug-info.cmake)
-endif()
-install(TARGETS axiomc RUNTIME DESTINATION bin)
-install(PROGRAMS "$<TARGET_FILE_DIR:axiomc>/axiom${CMAKE_EXECUTABLE_SUFFIX}" DESTINATION bin)
-install(FILES README.md CHANGELOG.md LICENSE DESTINATION share/doc/axiom)
-install(DIRECTORY docs examples DESTINATION share/doc/axiom PATTERN ".axiom" EXCLUDE PATTERN "axiom-cxx" EXCLUDE PATTERN ".argon" EXCLUDE PATTERN "argon-cxx" EXCLUDE)
-install(DIRECTORY editors DESTINATION share/axiom PATTERN "*.vsix" EXCLUDE PATTERN "test" EXCLUDE)
-install(FILES editors/vscode/README.md DESTINATION share/doc/axiom/editors/vscode)
-install(FILES editors/vim/README.md DESTINATION share/doc/axiom/editors/vim)
+
+add_library(commonml_core STATIC
+    src/source.cpp
+    src/lexer.cpp
+    src/ast.cpp
+    src/parser.cpp
+    src/types/type.cpp
+    src/types/unify.cpp
+    src/types/typecheck_env.cpp
+    src/types/typecheck_pat.cpp
+    src/types/typecheck_expr.cpp
+    src/runtime/value.cpp
+    src/runtime/builtins.cpp
+    src/bytecode/bytecode.cpp
+    src/codegen/compiler_state.cpp
+    src/codegen/compiler_pat.cpp
+    src/codegen/compiler_expr.cpp
+    src/vm/vm.cpp
+    src/vm/vm_ops.cpp
+    src/macro/macro_expander.cpp
+    src/driver/pipeline.cpp
+    src/driver/repl.cpp
+)
+
+target_include_directories(commonml_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+add_executable(commonml src/main.cpp)
+target_link_libraries(commonml PRIVATE commonml_core)
+
+enable_testing()
+add_executable(commonml_tests
+    tests/test_main.cpp
+    tests/test_lexer_parser.cpp
+    tests/test_typecheck.cpp
+    tests/test_macros.cpp
+    tests/test_vm.cpp
+)
+target_link_libraries(commonml_tests PRIVATE commonml_core)
+add_test(NAME commonml_unit_tests COMMAND commonml_tests)

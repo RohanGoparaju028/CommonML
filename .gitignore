@@ -1,17 +1,7 @@
-/build/
-/build-*/
-/.build/
-.axiom/
-axiom-cxx/
-*.swp
+build/
+cmake-build-*/
 .DS_Store
-
-/editors/vscode/*.vsix
-
-# Legacy generated output
-.argon/
-argon-cxx/
-
-# Previous compiler output
-.argsml/
-argsml-cxx/
+*.o
+*.a
+*.out
+*.exe
