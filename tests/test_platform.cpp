@@ -359,7 +359,8 @@ let b = Box { value = 42 }
 CML_TEST(platform_rc_collections_and_file_ops) {
     TempDirGuard tmp("cml_fs_test");
     Pipeline p;
-    std::string code = "let base = \"" + tmp.path.string() + "\"\n" + R"(
+    const auto base = std::make_shared<Expr>(Expr{ExprString{tmp.path.string()}, {}});
+    std::string code = "let base = " + expr_to_string(base) + "\n" + R"(
 -- Reference counting check
 let a = [1, 2, 3]
 let b = a

@@ -17,15 +17,26 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      pages_enabled: ${{ steps.pages.outputs.enabled }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check whether GitHub Pages is enabled
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          enabled=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.has_pages')
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
       - uses: actions/configure-pages@v5
-      - uses: actions/build-pages@v3
+        if: steps.pages.outputs.enabled == 'true'
+      - uses: actions/jekyll-build-pages@v1
         with:
           source: docs
       - uses: actions/upload-pages-artifact@v3
 
   deploy:
+    if: needs.build.outputs.pages_enabled == 'true'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
