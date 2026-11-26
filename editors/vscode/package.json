@@ -1,13 +1,14 @@
 {
   "name": "commonml-language",
   "displayName": "CommonML",
-  "description": "Syntax highlighting and language configuration for CommonML (.cml)",
+  "description": "Syntax highlighting, file association, and DAP debugger support for CommonML (.cml)",
   "version": "0.1.0",
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Debuggers"
   ],
   "contributes": {
     "languages": [
@@ -15,6 +16,7 @@
         "id": "commonml",
         "aliases": ["CommonML", "cml"],
         "extensions": [".cml"],
+        "filenames": ["build.cml"],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -23,6 +25,47 @@
         "language": "commonml",
         "scopeName": "source.commonml",
         "path": "./syntaxes/cml.tmLanguage.json"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "commonml",
+        "label": "CommonML Debugger (cml --dap)",
+        "languages": ["commonml"],
+        "program": "cml",
+        "args": ["--dap"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to the .cml entry file to debug",
+                "default": "${file}"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "commonml",
+            "request": "launch",
+            "name": "Debug Current CommonML File",
+            "program": "${file}"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "CommonML: Launch File",
+            "description": "Debug a CommonML (.cml) program via cml --dap",
+            "body": {
+              "type": "commonml",
+              "request": "launch",
+              "name": "Debug CommonML",
+              "program": "^\"\\${file}\""
+            }
+          }
+        ]
       }
     ]
   }

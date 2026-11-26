@@ -1,3 +1,8 @@
+---
+layout: default
+title: Hygienic Macros
+---
+
 # Hygienic Macros
 
 CommonML supports compile-time AST macros with Flatt-style sets-of-scopes hygiene.

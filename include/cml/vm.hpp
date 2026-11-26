@@ -13,6 +13,14 @@ namespace cml {
 
 class VM {
 public:
+    struct CallFrame {
+        ValClosure closure;
+        size_t ip = 0;
+        size_t base_slot = 0;
+    };
+
+    using DebugHook = std::function<void(const VM&, const Instruction&)>;
+
     VM();
 
     void register_builtins();
@@ -20,16 +28,14 @@ public:
     void set_global(const std::string& name, Value val);
     const Value* get_global(const std::string& name) const;
     const std::unordered_map<std::string, Value>& globals() const { return globals_; }
+    const std::vector<CallFrame>& frames() const { return frames_; }
+    const std::vector<Value>& stack() const { return stack_; }
+    void set_debug_hook(DebugHook hook) { debug_hook_ = std::move(hook); }
 
     Value run(const std::shared_ptr<FunctionProto>& entry);
     Value call_value(const Value& callee, const std::vector<Value>& args, const SourceSpan& span);
 
 private:
-    struct CallFrame {
-        ValClosure closure;
-        size_t ip = 0;
-        size_t base_slot = 0;
-    };
 
     Value execute();
     Rc<UpvalueObj> capture_upvalue(size_t stack_slot);
@@ -49,6 +55,7 @@ private:
     std::vector<Rc<UpvalueObj>> open_upvalues_;
     std::vector<Rc<HeapCell>> open_stack_ptrs_;
     std::unordered_map<std::string, Value> globals_;
+    DebugHook debug_hook_;
 };
 
 }  // namespace cml

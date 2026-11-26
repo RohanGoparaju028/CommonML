@@ -1,32 +1,67 @@
 #include "builtins_internal.hpp"
 #include "cml/source.hpp"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+using ssize_t = int;
+#else
 #include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include <cerrno>
 #include <csignal>
 #include <cstring>
-#include <netdb.h>
-#include <netinet/in.h>
 #include <string>
-#include <sys/socket.h>
-#include <unistd.h>
 
 namespace cml::detail {
 
 namespace {
 
+#ifdef _WIN32
+void ensure_winsock() {
+    static bool inited = []() {
+        WSADATA wsa {};
+        WSAStartup(MAKEWORD(2, 2), &wsa);
+        return true;
+    }();
+    (void)inited;
+}
+void close_sock(int fd) {
+    closesocket(static_cast<SOCKET>(fd));
+}
+#else
+void ensure_winsock() {}
+void close_sock(int fd) {
+    close(fd);
+}
+#endif
+
 void configure_socket_nosigpipe(int fd) {
 #ifdef SO_NOSIGPIPE
     int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
-#else
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, reinterpret_cast<const char*>(&yes), sizeof(yes));
+#elif !defined(_WIN32)
     (void)fd;
     std::signal(SIGPIPE, SIG_IGN);
+#else
+    (void)fd;
 #endif
 }
 
 std::string errno_msg(const std::string& prefix) {
+#ifdef _WIN32
+    return prefix + ": WSA error " + std::to_string(WSAGetLastError());
+#else
     return prefix + ": " + std::strerror(errno);
+#endif
 }
 
 }  // namespace
@@ -38,6 +73,7 @@ void append_net_builtins(std::vector<BuiltinDef>& list) {
         TypeScheme{{}, make_tfun(string_type(), make_tfun(int_type(), int_type()))},
         2,
         [](const std::vector<Value>& args) {
+            ensure_winsock();
             const auto& host = std::get<ValString>(args[0].node).value;
             int64_t port = std::get<ValInt>(args[1].node).value;
             if (port < 0 || port > 65535) {
@@ -60,17 +96,17 @@ void append_net_builtins(std::vector<BuiltinDef>& list) {
 
             int fd = -1;
             for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
-                fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+                fd = static_cast<int>(socket(p->ai_family, p->ai_socktype, p->ai_protocol));
                 if (fd < 0) continue;
                 int yes = 1;
-                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
                 configure_socket_nosigpipe(fd);
-                if (bind(fd, p->ai_addr, p->ai_addrlen) == 0) {
+                if (bind(fd, p->ai_addr, static_cast<int>(p->ai_addrlen)) == 0) {
                     if (listen(fd, 64) == 0) {
                         break;
                     }
                 }
-                close(fd);
+                close_sock(fd);
                 fd = -1;
             }
             freeaddrinfo(res);
@@ -123,6 +159,7 @@ void append_net_builtins(std::vector<BuiltinDef>& list) {
         TypeScheme{{}, make_tfun(string_type(), make_tfun(int_type(), int_type()))},
         2,
         [](const std::vector<Value>& args) {
+            ensure_winsock();
             const auto& host = std::get<ValString>(args[0].node).value;
             int64_t port = std::get<ValInt>(args[1].node).value;
             if (port <= 0 || port > 65535) {
@@ -143,13 +180,13 @@ void append_net_builtins(std::vector<BuiltinDef>& list) {
 
             int fd = -1;
             for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
-                fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+                fd = static_cast<int>(socket(p->ai_family, p->ai_socktype, p->ai_protocol));
                 if (fd < 0) continue;
                 configure_socket_nosigpipe(fd);
-                if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
+                if (connect(fd, p->ai_addr, static_cast<int>(p->ai_addrlen)) == 0) {
                     break;
                 }
-                close(fd);
+                close_sock(fd);
                 fd = -1;
             }
             freeaddrinfo(res);
@@ -175,9 +212,9 @@ void append_net_builtins(std::vector<BuiltinDef>& list) {
             size_t total = 0;
             while (total < data.size()) {
 #ifdef MSG_NOSIGNAL
-                ssize_t n = send(fd, data.data() + total, data.size() - total, MSG_NOSIGNAL);
+                ssize_t n = send(fd, data.data() + total, static_cast<int>(data.size() - total), MSG_NOSIGNAL);
 #else
-                ssize_t n = send(fd, data.data() + total, data.size() - total, 0);
+                ssize_t n = send(fd, data.data() + total, static_cast<int>(data.size() - total), 0);
 #endif
                 if (n < 0) {
                     if (errno == EINTR) continue;
@@ -206,7 +243,7 @@ void append_net_builtins(std::vector<BuiltinDef>& list) {
             std::string buf(static_cast<size_t>(max_bytes), '\0');
             ssize_t n = 0;
             do {
-                n = recv(fd, buf.data(), buf.size(), 0);
+                n = recv(fd, buf.data(), static_cast<int>(buf.size()), 0);
             } while (n < 0 && errno == EINTR);
             if (n < 0) {
                 throw CompileError(Diagnostic{"runtime", errno_msg("sock_recv failed"), {}});
@@ -235,7 +272,7 @@ void append_net_builtins(std::vector<BuiltinDef>& list) {
                     size_t rem = static_cast<size_t>(max_bytes) - out.size();
                     if (rem < to_read) to_read = rem;
                 }
-                ssize_t n = recv(fd, chunk, to_read, 0);
+                ssize_t n = recv(fd, chunk, static_cast<int>(to_read), 0);
                 if (n < 0) {
                     if (errno == EINTR) continue;
                     throw CompileError(Diagnostic{"runtime", errno_msg("sock_recv_all failed"), {}});
@@ -255,7 +292,7 @@ void append_net_builtins(std::vector<BuiltinDef>& list) {
         [](const std::vector<Value>& args) {
             int fd = static_cast<int>(std::get<ValInt>(args[0].node).value);
             if (fd >= 0) {
-                close(fd);
+                close_sock(fd);
             }
             return Value::unit();
         },

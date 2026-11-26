@@ -36,6 +36,7 @@ add_library(commonml_core STATIC
     src/driver/pipeline.cpp
     src/driver/repl.cpp
     src/driver/highlight.cpp
+    src/driver/debugger.cpp
     src/driver/toolchain.cpp
     src/pkg/package.cpp
 )
@@ -47,6 +48,9 @@ target_compile_definitions(commonml_core PUBLIC
     CML_STDLIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/stdlib"
     CML_VERSION_STRING="${PROJECT_VERSION}"
 )
+if(WIN32)
+    target_link_libraries(commonml_core PUBLIC ws2_32)
+endif()
 
 add_executable(commonml src/main.cpp)
 target_link_libraries(commonml PRIVATE commonml_core)
@@ -56,27 +60,53 @@ target_link_libraries(cml PRIVATE commonml_core)
 
 add_executable(cmlc src/cmlc_main.cpp)
 target_link_libraries(cmlc PRIVATE commonml_core)
-target_compile_definitions(cmlc PRIVATE
-    CML_COMMONML_BIN="$<TARGET_FILE:commonml>"
-)
-target_compile_definitions(cml PRIVATE
-    CML_COMMONML_BIN="$<TARGET_FILE:commonml>"
-)
-target_compile_definitions(commonml PRIVATE
-    CML_COMMONML_BIN="$<TARGET_FILE:commonml>"
-)
 
-install(TARGETS commonml cml cmlc RUNTIME DESTINATION bin)
-install(DIRECTORY stdlib/ DESTINATION share/commonml/stdlib FILES_MATCHING PATTERN "*.cml")
-install(DIRECTORY bootstrap/ DESTINATION share/commonml/bootstrap FILES_MATCHING PATTERN "*.cml")
-install(DIRECTORY editors/vscode/ DESTINATION share/commonml/editors/vscode)
-install(FILES README.md DESTINATION share/doc/commonml)
+foreach(tgt IN ITEMS commonml cml cmlc)
+    target_compile_definitions(${tgt} PRIVATE
+        CML_COMMONML_BIN="$<TARGET_FILE:commonml>"
+    )
+endforeach()
+
+install(TARGETS commonml cml cmlc RUNTIME DESTINATION bin COMPONENT commonml)
+install(DIRECTORY stdlib/ DESTINATION share/commonml/stdlib COMPONENT commonml FILES_MATCHING PATTERN "*.cml")
+install(DIRECTORY bootstrap/ DESTINATION share/commonml/bootstrap COMPONENT commonml FILES_MATCHING PATTERN "*.cml")
+install(DIRECTORY editors/vscode/ DESTINATION share/commonml/editors/vscode COMPONENT commonml)
+install(DIRECTORY editors/vim/ DESTINATION share/commonml/editors/vim COMPONENT commonml)
+install(DIRECTORY editors/emacs/ DESTINATION share/commonml/editors/emacs COMPONENT commonml)
+install(FILES README.md DESTINATION share/doc/commonml COMPONENT commonml)
+install(FILES packaging/linux/commonml.xml DESTINATION share/mime/packages COMPONENT commonml)
+install(FILES packaging/linux/commonml.desktop DESTINATION share/applications COMPONENT commonml)
+install(FILES packaging/macos/Info.plist DESTINATION share/commonml/macos COMPONENT commonml)
+install(FILES packaging/windows/register_cml.cmd DESTINATION share/commonml/windows COMPONENT commonml)
+
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/README.md" "${CMAKE_CURRENT_BINARY_DIR}/README.txt" COPYONLY)
 
 set(CPACK_PACKAGE_NAME "commonml")
+set(CPACK_PACKAGE_VENDOR "CommonML Project")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "CommonML functional language compiler, VM, and package manager")
-set(CPACK_GENERATOR "TGZ;ZIP")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "CommonML functional systems language compiler, VM, debugger, and package manager")
+set(CPACK_PACKAGE_CONTACT "Rohan Goparaju <goparajurohan41@gmail.com>")
+set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_BINARY_DIR}/README.txt")
+
+if(WIN32)
+    set(CPACK_GENERATOR "WIX;ZIP")
+    set(CPACK_WIX_UPGRADE_GUID "6B7A9012-7E5A-4B48-9B9C-2026C0AA0101")
+    set(CPACK_WIX_PRODUCT_GUID "9C8F31A0-5A21-48A0-A3E4-2026C0AA0101")
+    set(CPACK_WIX_PROGRAM_MENU_FOLDER "CommonML")
+elseif(APPLE)
+    set(CPACK_GENERATOR "productbuild;TGZ")
+    set(CPACK_PRODUCTBUILD_IDENTIFIER "org.commonml")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/usr/local")
+else()
+    set(CPACK_GENERATOR "DEB;RPM;TGZ")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Rohan Goparaju <goparajurohan41@gmail.com>")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    set(CPACK_RPM_PACKAGE_GROUP "Development/Languages")
+endif()
 include(CPack)
+cpack_add_component(commonml DISPLAY_NAME "CommonML Toolchain" REQUIRED)
 
 enable_testing()
 add_executable(commonml_tests

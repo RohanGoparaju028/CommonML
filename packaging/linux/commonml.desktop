@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=CommonML Runtime
+GenericName=CommonML Compiler & VM
+Comment=Execute or debug CommonML (.cml) programs
+Exec=cml run %f
+Icon=utilities-terminal
+Terminal=true
+Categories=Development;IDE;
+MimeType=text/x-commonml;application/x-commonml-bytecode;
+NoDisplay=true

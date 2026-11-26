@@ -1,3 +1,8 @@
+---
+layout: default
+title: Compiler and VM Architecture
+---
+
 # Compiler & VM Architecture
 
 Every source input flows through a 6-stage pipeline coordinated by `cml::Pipeline`:

@@ -257,6 +257,9 @@ Value VM::execute() {
         }
 
         const Instruction ins = chunk.code[frame.ip++];
+        if (debug_hook_) {
+            debug_hook_(*this, ins);
+        }
         switch (ins.op) {
             case OpCode::Const:
                 stack_.push_back(chunk.constants[static_cast<size_t>(ins.arg1)]);

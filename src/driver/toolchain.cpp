@@ -79,6 +79,25 @@ int compile_file_to_output(const CompileOutputOptions& opts, std::ostream& out, 
         if (bc_only) {
             ofs.write(bc.data(), static_cast<std::streamsize>(bc.size()));
         } else {
+#ifdef _WIN32
+            std::string bc_sidecar = out_path + ".cmlbc";
+            {
+                std::ofstream bcfs(bc_sidecar, std::ios::binary | std::ios::trunc);
+                bcfs.write(bc.data(), static_cast<std::streamsize>(bc.size()));
+            }
+            ofs << "@echo off\r\n"
+                << "set \"RUNTIME=%CML_RUNTIME%\"\r\n"
+                << "if \"%RUNTIME%\"==\"\" set \"RUNTIME=commonml\"\r\n"
+                << "\"%RUNTIME%\" --run-bc \"" << bc_sidecar << "\" %*\r\n";
+            if (fs::path(out_path).extension() != ".cmd" &&
+                fs::path(out_path).extension() != ".bat") {
+                std::ofstream cmdfs(out_path + ".cmd", std::ios::binary | std::ios::trunc);
+                cmdfs << "@echo off\r\n"
+                      << "set \"RUNTIME=%CML_RUNTIME%\"\r\n"
+                      << "if \"%RUNTIME%\"==\"\" set \"RUNTIME=commonml\"\r\n"
+                      << "\"%RUNTIME%\" --run-bc \"" << bc_sidecar << "\" %*\r\n";
+            }
+#else
             ofs << "#!/bin/sh\n"
                 << "RUNTIME=\"${CML_RUNTIME:-}\"\n"
                 << "if [ -z \"$RUNTIME\" ]; then\n"
@@ -92,6 +111,7 @@ int compile_file_to_output(const CompileOutputOptions& opts, std::ostream& out, 
                 << "fi\n"
                 << "exec \"$RUNTIME\" --run-bc \"$0\" \"$@\"\n";
             ofs.write(bc.data(), static_cast<std::streamsize>(bc.size()));
+#endif
         }
         ofs.close();
 

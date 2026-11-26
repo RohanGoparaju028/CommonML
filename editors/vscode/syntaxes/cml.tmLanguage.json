@@ -77,11 +77,15 @@
       "patterns": [
         {
           "name": "keyword.control.commonml",
-          "match": "\\b(if|then|else|match|with|begin|end|import|while|for|each|break|continue)\\b"
+          "match": "\\b(if|then|else|match|with|begin|end|import|while|for|each|break|continue|defer|close)\\b"
         },
         {
           "name": "keyword.declaration.commonml",
-          "match": "\\b(let|var|rec|in|fn|type|struct|macro|quote)\\b"
+          "match": "\\b(let|var|rec|in|fn|type|struct|macro|quote|new)\\b"
+        },
+        {
+          "name": "storage.type.primitive.commonml",
+          "match": "\\b(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64|bool|str|string|unit|void|int|float)\\b"
         }
       ]
     },
@@ -109,7 +113,7 @@
       "patterns": [
         {
           "name": "keyword.operator.commonml",
-          "match": "\\|>|::|\\+\\+|->|==|!=|<=|>=|&&|\\|\\||\\+\\.|\\-\\.|\\*\\.|/\\.|[+\\-*/%<>=|]"
+          "match": "\\|>|::|\\+\\+|->|<<|>>|==|!=|<=|>=|&&|\\|\\||\\+\\.|\\-\\.|\\*\\.|/\\.|[+\\-*/%<>=|&^~!]"
         }
       ]
     }

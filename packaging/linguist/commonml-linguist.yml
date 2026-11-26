@@ -1,0 +1,15 @@
+# Draft entry for an upstream PR to https://github.com/github-linguist/linguist
+# File: lib/linguist/languages.yml
+CommonML:
+  type: programming
+  color: "#4F46E5"
+  extensions:
+    - ".cml"
+    - ".cmlbc"
+  filenames:
+    - "build.cml"
+  tm_scope: source.commonml
+  ace_mode: ocaml
+  codemirror_mode: mllike
+  codemirror_mime_type: text/x-commonml
+  language_id: 901284710

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ page.title | default: "CommonML Documentation" }} | CommonML Docs</title>
+  <link rel="stylesheet" href="{{ '/assets/style.css' | relative_url }}" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="{{ '/' | relative_url }}">CommonML <span>Docs</span></a>
+      <nav class="topnav">
+        <a href="{{ '/tour-of-commonml.html' | relative_url }}">Tour</a>
+        <a href="{{ '/getting-started/installation.html' | relative_url }}">Install</a>
+        <a href="{{ '/fundamentals/types.html' | relative_url }}">Language</a>
+        <a href="{{ '/reference/stdlib.html' | relative_url }}">API</a>
+        <a href="{{ '/tooling/cli-editors-debugger.html' | relative_url }}">Tools &amp; Debugger</a>
+        <a href="https://github.com/RohanGoparaju028/CommonML">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="nav-group">
+        <div class="nav-heading">Overview</div>
+        <a href="{{ '/' | relative_url }}">CommonML Documentation</a>
+        <a href="{{ '/tour-of-commonml.html' | relative_url }}">A tour of CommonML</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-heading">Get Started</div>
+        <a href="{{ '/getting-started/installation.html' | relative_url }}">Installers (Windows / macOS / Linux)</a>
+        <a href="{{ '/getting-started/hello-world.html' | relative_url }}">Hello World &amp; build.cml</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-heading">Fundamentals</div>
+        <a href="{{ '/fundamentals/types.html' | relative_url }}">Type System &amp; Data Structures</a>
+        <a href="{{ '/fundamentals/memory-and-pointers.html' | relative_url }}">Memory Safety, Pointers, new &amp; defer</a>
+        <a href="{{ '/fundamentals/control-flow-and-functions.html' | relative_url }}">Functions, Blocks &amp; Control Flow</a>
+        <a href="{{ '/fundamentals/modules-and-packages.html' | relative_url }}">Modules &amp; Packages (build.cml)</a>
+        <a href="{{ '/macros.html' | relative_url }}">Hygienic Macros</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-heading">Reference &amp; Tooling</div>
+        <a href="{{ '/language.html' | relative_url }}">Quick Language Reference</a>
+        <a href="{{ '/reference/stdlib.html' | relative_url }}">Standard Library &amp; Builtins</a>
+        <a href="{{ '/tooling/cli-editors-debugger.html' | relative_url }}">CLI, Debugger (DAP) &amp; Editors</a>
+        <a href="{{ '/architecture.html' | relative_url }}">VM, Bytecode &amp; Self-Hosting</a>
+      </div>
+    </aside>
+
+    <main class="content">
+      {{ content }}
+      <footer class="doc-footer">
+        CommonML (`cml` / `cmlc`) &mdash; Functional Systems Language Documentation
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

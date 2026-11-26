@@ -1,5 +1,6 @@
 #include "test_framework.hpp"
 #include "cml/builtins.hpp"
+#include "cml/debugger.hpp"
 #include "cml/highlight.hpp"
 #include "cml/package.hpp"
 #include "cml/pipeline.hpp"
@@ -504,4 +505,54 @@ let b : i64 = 2
 a + b
 )"),
                       CompileError);
+}
+
+CML_TEST(platform_debugger_cli_and_dap) {
+    TempDirGuard tmp("cml_dbg_test");
+    fs::path dbg_file = tmp.path / "dbg_sample.cml";
+    {
+        std::ofstream f(dbg_file);
+        f << "let rect = struct:\n"
+          << "  x: i32\n"
+          << "  y: i32\n"
+          << "\n"
+          << "let calc a =\n"
+          << "  let r = new rect { .x = a, .y = 5 }\n"
+          << "  defer close r\n"
+          << "  let total = r->x * r->y\n"
+          << "  total\n"
+          << "\n"
+          << "calc 12\n";
+    }
+
+    DebugSessionConfig cfg;
+    cfg.entry_file = dbg_file.string();
+    cfg.stop_on_entry = false;
+    cfg.initial_breakpoints = {8};
+
+    std::istringstream in("locals\np r->x\nheap\nbt\nc\n");
+    std::ostringstream out;
+    std::ostringstream err;
+    Debugger dbg;
+    int rc = dbg.run_cli(cfg, in, out, err);
+    CML_ASSERT_EQ(rc, 0);
+    std::string out_s = out.str();
+    CML_ASSERT(out_s.find("[breakpoint]") != std::string::npos);
+    CML_ASSERT(out_s.find("a = 12") != std::string::npos);
+    CML_ASSERT(out_s.find("12\n") != std::string::npos);
+    CML_ASSERT(out_s.find("live heap allocations: 1") != std::string::npos);
+    CML_ASSERT(out_s.find("Program exited with value: 60") != std::string::npos);
+
+    // DAP initialize + disconnect roundtrip
+    std::string m1 = "{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\"}";
+    std::string m2 = "{\"seq\":2,\"type\":\"request\",\"command\":\"disconnect\"}";
+    std::istringstream dap_in("Content-Length: " + std::to_string(m1.size()) + "\r\n\r\n" + m1 +
+                               "Content-Length: " + std::to_string(m2.size()) + "\r\n\r\n" + m2);
+    std::ostringstream dap_out;
+    std::ostringstream dap_err;
+    CML_ASSERT_EQ(dbg.run_dap(dap_in, dap_out, dap_err), 0);
+    std::string dap_s = dap_out.str();
+    CML_ASSERT(dap_s.find("\"command\":\"initialize\"") != std::string::npos);
+    CML_ASSERT(dap_s.find("\"event\":\"initialized\"") != std::string::npos);
+    CML_ASSERT(dap_s.find("\"command\":\"disconnect\"") != std::string::npos);
 }

@@ -33,6 +33,10 @@ Chunk& Compiler::chunk() {
 uint32_t Compiler::alloc_local(const Ident& ident) {
     uint32_t slot = static_cast<uint32_t>(current_->locals.size());
     current_->locals.push_back(LocalVar{ident, slot, false});
+    if (chunk().local_names.size() <= slot) {
+        chunk().local_names.resize(slot + 1);
+    }
+    chunk().local_names[slot] = ident.name;
     if (current_->locals.size() > current_->max_locals) {
         current_->max_locals = static_cast<uint32_t>(current_->locals.size());
     }

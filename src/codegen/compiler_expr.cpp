@@ -618,6 +618,9 @@ void Compiler::compile_fn_expr(const ExprFn& fn_expr, const SourceSpan& span) {
     uint32_t param_slot = alloc_local(param_ident);
     if (auto* pv = std::get_if<PatVar>(&fn_expr.param->node)) {
         current_->locals[param_slot].ident = pv->ident;
+        if (param_slot < chunk().local_names.size()) {
+            chunk().local_names[param_slot] = pv->ident.name;
+        }
     } else if (!std::holds_alternative<PatWildcard>(fn_expr.param->node)) {
         emit(OpCode::GetLocal, static_cast<int32_t>(param_slot), 0, span);
         compile_pattern_bind(fn_expr.param, false);

@@ -1,0 +1,16 @@
+# GitHub Linguist configuration for CommonML
+# Prioritize CommonML (.cml) source files in repository language statistics.
+*.cml linguist-detectable=true
+bootstrap/*.cml linguist-detectable=true
+stdlib/*.cml linguist-detectable=true
+
+# Exclude C++ Stage-0 host, build configs, tests, editors, packaging, and docs
+# from overriding CommonML in GitHub's language bar.
+src/** linguist-vendored
+include/** linguist-vendored
+CMakeLists.txt linguist-vendored
+tests/** linguist-vendored
+editors/** linguist-vendored
+packaging/** linguist-vendored
+docs/** linguist-documentation
+build/** linguist-generated

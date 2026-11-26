@@ -1,5 +1,6 @@
 #include "cml/builtins.hpp"
 #include "cml/bytecode.hpp"
+#include "cml/debugger.hpp"
 #include "cml/highlight.hpp"
 #include "cml/package.hpp"
 #include "cml/pipeline.hpp"
@@ -27,6 +28,7 @@ namespace fs = std::filesystem;
 static void print_usage(const char* prog) {
     std::cout << "Usage:\n"
               << "  " << prog << " run [file.cml] [-- args...]       Run a file (like 'go run') or build.cml project\n"
+              << "  " << prog << " debug <file.cml> [-b line]        Start interactive source debugger\n"
               << "  " << prog << " build [file.cml] [-o out]           Compile file to executable or build build.cml\n"
               << "  " << prog << " new <lib|console|web> <name>        Create a new project\n"
               << "  " << prog << " init <lib|console|web>              Initialize build.cml in current dir\n"
@@ -42,6 +44,7 @@ static void print_usage(const char* prog) {
               << "  --bc            Dump compiled bytecode\n"
               << "  --check         Typecheck only without executing\n"
               << "  --highlight     Print ANSI syntax-highlighted source\n"
+              << "  --dap           Start Debug Adapter Protocol server (VS Code / Neovim / Emacs)\n"
               << "  -v, --version   Show version\n"
               << "  -h, --help      Show this help message\n";
 }
@@ -210,6 +213,28 @@ static int handle_subcommand(int argc, char** argv) {
         if (cmd == "test") {
             return cml::PackageManager::cmd_test(find_project_root_or_fail(), std::cout, std::cerr);
         }
+        if (cmd == "debug") {
+            cml::DebugSessionConfig cfg;
+            for (int i = 2; i < argc; ++i) {
+                std::string a = argv[i];
+                if (a == "-b" && i + 1 < argc) {
+                    cfg.initial_breakpoints.push_back(static_cast<size_t>(std::stoul(argv[++i])));
+                } else if (a == "--") {
+                    for (int j = i + 1; j < argc; ++j) cfg.args.push_back(argv[j]);
+                    break;
+                } else if (cfg.entry_file.empty()) {
+                    cfg.entry_file = a;
+                } else {
+                    cfg.args.push_back(a);
+                }
+            }
+            if (cfg.entry_file.empty()) {
+                std::cerr << "usage: " << argv[0] << " debug <file.cml> [-b line] [-- args...]\n";
+                return 1;
+            }
+            cml::Debugger dbg;
+            return dbg.run_cli(cfg, std::cin, std::cout, std::cerr);
+        }
         if (cmd == "pkg") {
             if (argc >= 3 && std::string(argv[2]) == "list") {
                 return cml::PackageManager::cmd_list(find_project_root_or_fail(), std::cout);
@@ -232,8 +257,12 @@ int main(int argc, char** argv) {
     if (argc >= 2) {
         std::string sub = argv[1];
         if (sub == "new" || sub == "init" || sub == "add" || sub == "install" ||
-            sub == "build" || sub == "run" || sub == "test" || sub == "pkg") {
+            sub == "build" || sub == "run" || sub == "test" || sub == "pkg" || sub == "debug") {
             return handle_subcommand(argc, argv);
+        }
+        if (sub == "--dap") {
+            cml::Debugger dbg;
+            return dbg.run_dap(std::cin, std::cout, std::cerr);
         }
     }
 

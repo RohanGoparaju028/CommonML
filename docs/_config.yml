@@ -1,0 +1,14 @@
+title: CommonML Documentation
+description: Complete C#-style reference and guide for the CommonML functional systems programming language
+theme: null
+markdown: kramdown
+baseurl: "/CommonML"
+url: "https://rohangoparaju028.github.io"
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+plugins:
+  - jekyll-relative-links
+relative_links:
+  enabled: true
+  collections: true

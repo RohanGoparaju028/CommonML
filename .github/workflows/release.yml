@@ -1,0 +1,82 @@
+name: Release Installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_pattern: "commonml-*"
+          - os: macos-latest
+            artifact_pattern: "commonml-*"
+          - os: windows-latest
+            artifact_pattern: "commonml-*"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm file
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package installers (Linux DEB/RPM/TGZ)
+        if: runner.os == 'Linux'
+        run: cpack --config build/CPackConfig.cmake -G "DEB;RPM;TGZ" -B dist
+
+      - name: Package installers (macOS PKG/TGZ)
+        if: runner.os == 'macOS'
+        run: cpack --config build/CPackConfig.cmake -G "productbuild;TGZ" -B dist
+
+      - name: Package installers (Windows MSI/ZIP)
+        if: runner.os == 'Windows'
+        run: cpack --config build/CPackConfig.cmake -C Release -G "WIX;ZIP" -B dist
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: dist/*
+
+  publish-release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            all-dist/installers-Linux/*.deb
+            all-dist/installers-Linux/*.rpm
+            all-dist/installers-Linux/*.tar.gz
+            all-dist/installers-macOS/*.pkg
+            all-dist/installers-macOS/*.tar.gz
+            all-dist/installers-Windows/*.msi
+            all-dist/installers-Windows/*.zip

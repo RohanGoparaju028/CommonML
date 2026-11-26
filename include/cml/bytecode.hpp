@@ -117,6 +117,7 @@ struct Chunk {
     std::vector<Instruction> code;
     std::vector<Value> constants;
     std::vector<std::string> names;
+    std::vector<std::string> local_names;
     std::vector<QuoteTemplate> quotes;
 
     uint32_t add_constant(Value v);

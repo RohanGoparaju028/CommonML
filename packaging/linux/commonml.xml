@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="text/x-commonml">
+    <comment>CommonML source code</comment>
+    <sub-class-of type="text/plain"/>
+    <glob pattern="*.cml"/>
+    <glob pattern="build.cml"/>
+  </mime-type>
+  <mime-type type="application/x-commonml-bytecode">
+    <comment>CommonML compiled bytecode</comment>
+    <glob pattern="*.cmlbc"/>
+    <magic priority="50">
+      <match type="string" offset="0" value="CMLBC 1"/>
+    </magic>
+  </mime-type>
+</mime-info>

@@ -1,3 +1,8 @@
+---
+layout: default
+title: Quick Language Reference
+---
+
 # CommonML Language Reference
 
 ## Comments

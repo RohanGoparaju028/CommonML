@@ -312,6 +312,10 @@ std::string serialize_bytecode(const BytecodeProgram& prog) {
             os << "NAME ";
             write_len_str(os, nm);
         }
+        for (const auto& lnm : p->chunk.local_names) {
+            os << "LOCAL ";
+            write_len_str(os, lnm);
+        }
         for (const auto& ins : p->chunk.code) {
             os << "CODE " << opcode_name(ins.op) << " " << ins.arg1 << " " << ins.arg2 << "\n";
         }
@@ -410,6 +414,8 @@ BytecodeProgram deserialize_bytecode(const std::string& data) {
                     }
                 } else if (sub == "NAME") {
                     proto->chunk.add_name(read_len_str());
+                } else if (sub == "LOCAL") {
+                    proto->chunk.local_names.push_back(read_len_str());
                 } else if (sub == "CODE") {
                     OpCode op = opcode_from_name(read_word());
                     int32_t a1 = static_cast<int32_t>(std::stol(read_word()));

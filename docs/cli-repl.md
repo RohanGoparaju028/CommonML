@@ -1,3 +1,8 @@
+---
+layout: default
+title: CLI and REPL Reference
+---
+
 # CLI & REPL Guide
 
 ## CLI Usage
