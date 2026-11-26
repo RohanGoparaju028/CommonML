@@ -37,7 +37,7 @@ Welcome to the official documentation for **CommonML** (`cml` and `cmlc`), a sta
   </div>
   <div class="card">
     <h3><a href="fundamentals/control-flow-and-functions.html">Functions &amp; Control Flow</a></h3>
-    <p>Uniform <code>=</code> and <code>:</code> indentation blocks, <code>fn(...) : Ret:</code>, pattern matching, <code>while</code>, <code>for</code>, and <code>for each</code> loops.</p>
+    <p>Uniform <code>=</code> and <code>:</code> indentation blocks, <code>let f = func(...) -&gt; Ret:</code>, pattern matching, <code>while</code>, <code>for</code>, and <code>for each</code> loops.</p>
   </div>
 </div>
 

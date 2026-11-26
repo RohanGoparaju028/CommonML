@@ -38,5 +38,5 @@ CML_TEST(typecheck_recursive_and_adt) {
 
 CML_TEST(typecheck_rejects_mismatch_and_occurs) {
     CML_ASSERT_THROWS(check_src("let bad = 1 + true"), CompileError);
-    CML_ASSERT_THROWS(check_src("let inf = fn x -> x x"), CompileError);
+    CML_ASSERT_THROWS(check_src("let inf = func x -> x x"), CompileError);
 }

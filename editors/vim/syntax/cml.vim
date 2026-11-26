@@ -3,7 +3,7 @@ if exists("b:current_syntax")
   finish
 endif
 
-syntax keyword cmlKeyword let var rec in fn type struct macro quote new defer close
+syntax keyword cmlKeyword let var rec in func type struct macro quote new defer close
 syntax keyword cmlControl if then else match with while for each break continue import begin end
 syntax keyword cmlBoolean true false
 syntax keyword cmlPrimType Int Float Bool String Unit Ast List Vector Dict Set Ptr

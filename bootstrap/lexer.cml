@@ -59,7 +59,7 @@ let keyword_or_ident word =
   | "let" -> TKKwLet
   | "rec" -> TKKwRec
   | "in" -> TKKwIn
-  | "fn" -> TKKwFn
+  | "func" -> TKKwFunc
   | "if" -> TKKwIf
   | "then" -> TKKwThen
   | "else" -> TKKwElse

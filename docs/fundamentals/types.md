@@ -27,12 +27,12 @@ CommonML uses **Hindley-Milner type inference** paired with systems primitive ty
 
 ## Structs
 
-Structs can be defined either with `let <name> = struct:` or `struct <Name>`:
+Structs are assigned with `let <name> = struct:` with fields indented relative to the `struct` keyword:
 
 ```text
 let rect = struct:
-  x: i32
-  y: i32
+             x: i32
+             y: i32
 
 let r1 = rect { .x = 10, .y = 20 }
 let p1 = r1.x * r1.y

@@ -239,8 +239,8 @@ let is_prime n =
       d = d + 1
     ok
 
-let sum_int xs = core.list_foldl (fn acc x -> acc + x) 0 xs
-let sum_float xs = core.list_foldl (fn acc x -> acc +. x) 0.0 xs
+let sum_int xs = core.list_foldl (func acc x -> acc + x) 0 xs
+let sum_float xs = core.list_foldl (func acc x -> acc +. x) 0.0 xs
 
 let mean_float xs =
   let n = list_len xs
@@ -251,7 +251,7 @@ let variance_float xs =
   if n == 0 then 0.0
   else
     let m = mean_float xs
-    let sq = core.list_foldl (fn acc x -> let d = x -. m in acc +. d *. d) 0.0 xs
+    let sq = core.list_foldl (func acc x -> let d = x -. m in acc +. d *. d) 0.0 xs
     sq /. float_of_int n
 
 let stddev_float xs = sqrt (variance_float xs)

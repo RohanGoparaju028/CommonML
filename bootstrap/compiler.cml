@@ -170,7 +170,7 @@ let rec resolve_upvalue_stack fns name =
 let cs_find_ctor cname st =
   match st with
   | CSt _ _ ctors _ ->
-      core.list_find (fn c -> match c with | (nm, _, _) -> nm == cname) ctors
+      core.list_find (func c -> match c with | (nm, _, _) -> nm == cname) ctors
 
 let cs_register_type cdefs st =
   let rec go i s =
@@ -189,10 +189,10 @@ let cs_register_type cdefs st =
 let rec collect_pat_binders pat acc =
   match pat with
   | PVar nm -> nm :: acc
-  | PTuple ps -> core.list_foldl (fn a p -> collect_pat_binders p a) acc ps
-  | PList ps -> core.list_foldl (fn a p -> collect_pat_binders p a) acc ps
+  | PTuple ps -> core.list_foldl (func a p -> collect_pat_binders p a) acc ps
+  | PList ps -> core.list_foldl (func a p -> collect_pat_binders p a) acc ps
   | PCons hd tl -> collect_pat_binders tl (collect_pat_binders hd acc)
-  | PCtor _ args -> core.list_foldl (fn a p -> collect_pat_binders p a) acc args
+  | PCtor _ args -> core.list_foldl (func a p -> collect_pat_binders p a) acc args
   | _ -> acc
 
 let rec compile_pat_match pat fail_jumps st =
@@ -234,7 +234,7 @@ let rec compile_pat_match pat fail_jumps st =
       if is_empty sub_fails then (fj1, st3)
       else
         let (ok_j, st4) = cs_emit OpJump 0 0 st3 in
-        let st5 = core.list_foldl (fn s j -> cs_patch_jump j s) st4 sub_fails in
+        let st5 = core.list_foldl (func s j -> cs_patch_jump j s) st4 sub_fails in
         let st6 = cs_emit_s OpPop 0 0 st5 in
         let (out_j, st7) = cs_emit OpJump 0 0 st6 in
         (list_snoc fj1 out_j, cs_patch_jump ok_j st7)
@@ -253,7 +253,7 @@ let rec compile_pat_match pat fail_jumps st =
       if is_empty sub_fails then (fj1, st3)
       else
         let (ok_j, st4) = cs_emit OpJump 0 0 st3 in
-        let st5 = core.list_foldl (fn s j -> cs_patch_jump j s) st4 sub_fails in
+        let st5 = core.list_foldl (func s j -> cs_patch_jump j s) st4 sub_fails in
         let st6 = cs_emit_s OpPop 0 0 st5 in
         let (out_j, st7) = cs_emit OpJump 0 0 st6 in
         (list_snoc fj1 out_j, cs_patch_jump ok_j st7)
@@ -268,7 +268,7 @@ let rec compile_pat_match pat fail_jumps st =
       if is_empty sf2 then (fj1, st6)
       else
         let (ok_j, st7) = cs_emit OpJump 0 0 st6 in
-        let st8 = core.list_foldl (fn s j -> cs_patch_jump j s) st7 sf2 in
+        let st8 = core.list_foldl (func s j -> cs_patch_jump j s) st7 sf2 in
         let st9 = cs_emit_s OpPop 0 0 st8 in
         let (out_j, st10) = cs_emit OpJump 0 0 st9 in
         (list_snoc fj1 out_j, cs_patch_jump ok_j st10)
@@ -290,7 +290,7 @@ let rec compile_pat_match pat fail_jumps st =
           if is_empty sub_fails then (fj1, st3)
           else
             let (ok_j, st4) = cs_emit OpJump 0 0 st3 in
-            let st5 = core.list_foldl (fn s j -> cs_patch_jump j s) st4 sub_fails in
+            let st5 = core.list_foldl (func s j -> cs_patch_jump j s) st4 sub_fails in
             let st6 = cs_emit_s OpPop 0 0 st5 in
             let (out_j, st7) = cs_emit OpJump 0 0 st6 in
             (list_snoc fj1 out_j, cs_patch_jump ok_j st7))
@@ -301,7 +301,7 @@ let compile_pat_bind pat is_global st =
     if is_empty fails then st1
     else
       let (ok_j, st2) = cs_emit OpJump 0 0 st1 in
-      let st3 = core.list_foldl (fn s j -> cs_patch_jump j s) st2 fails in
+      let st3 = core.list_foldl (func s j -> cs_patch_jump j s) st2 fails in
       let st4 = cs_emit_s OpMatchFail 0 0 st3 in
       cs_patch_jump ok_j st4
   else
@@ -311,7 +311,7 @@ let compile_pat_bind pat is_global st =
       if is_empty fails then st1
       else
         let (ok_j, s2) = cs_emit OpJump 0 0 st1 in
-        let s3 = core.list_foldl (fn s j -> cs_patch_jump j s) s2 fails in
+        let s3 = core.list_foldl (func s j -> cs_patch_jump j s) s2 fails in
         let s4 = cs_emit_s OpMatchFail 0 0 s3 in
         cs_patch_jump ok_j s4
     in
@@ -402,10 +402,10 @@ let rec compile_bexpr expr tail_pos st =
             let (ni, st1) = cs_add_name cname st in
             cs_emit_s OpGetGlobal ni 0 st1)
   | ETuple elems ->
-      let st1 = core.list_foldl (fn s e -> compile_bexpr e false s) st elems in
+      let st1 = core.list_foldl (func s e -> compile_bexpr e false s) st elems in
       cs_emit_s OpMakeTuple (list_len elems) 0 st1
   | EList elems ->
-      let st1 = core.list_foldl (fn s e -> compile_bexpr e false s) st elems in
+      let st1 = core.list_foldl (func s e -> compile_bexpr e false s) st elems in
       cs_emit_s OpMakeList (list_len elems) 0 st1
   | EUnary op e ->
       (match op with
@@ -523,7 +523,7 @@ let rec compile_bexpr expr tail_pos st =
       let rec go i end_js s =
         if i >= list_len arms then
           let s1 = cs_emit_s OpMatchFail 0 0 s in
-          let s2 = core.list_foldl (fn sx j -> cs_patch_jump j sx) s1 end_js in
+          let s2 = core.list_foldl (func sx j -> cs_patch_jump j sx) s1 end_js in
           cs_pop_locals_to scrut_mark s2
         else
           let (p, b) = list_nth arms i in
@@ -533,7 +533,7 @@ let rec compile_bexpr expr tail_pos st =
           let s3 = compile_bexpr b tail_pos s2 in
           let s4 = cs_pop_locals_to arm_mark s3 in
           let (ej, s5) = cs_emit OpJump 0 0 s4 in
-          let s6 = core.list_foldl (fn sx j -> cs_patch_jump j sx) s5 fails in
+          let s6 = core.list_foldl (func sx j -> cs_patch_jump j sx) s5 fails in
           let s7 = cs_pop_locals_to arm_mark s6 in
           go (i + 1) (list_snoc end_js ej) s7
       in
@@ -542,7 +542,7 @@ let rec compile_bexpr expr tail_pos st =
   | EStructLit sname fields ->
       let (tni, st1) = cs_add_name sname st in
       let st2 =
-        core.list_foldl (fn s kv ->
+        core.list_foldl (func s kv ->
           match kv with
           | (fnm, fv) ->
               let (ki, s1) = cs_add_const (BCString fnm) s in

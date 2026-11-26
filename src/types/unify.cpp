@@ -84,6 +84,31 @@ void unify_into(const TypePtr& a_in, const TypePtr& b_in, Subst& subst, std::str
                 type_to_string(b) + "'";
 }
 
+static TypePtr apply_renaming(const Subst& s, const TypePtr& t) {
+    if (!t) return nullptr;
+    return std::visit(
+        [&](const auto& n) -> TypePtr {
+            using T = std::decay_t<decltype(n)>;
+            if constexpr (std::is_same_v<T, TypeVar>) {
+                auto it = s.find(n.id);
+                return it != s.end() ? it->second : t;
+            } else if constexpr (std::is_same_v<T, TypeCon>) {
+                std::vector<TypePtr> args;
+                args.reserve(n.args.size());
+                for (const auto& a : n.args) args.push_back(apply_renaming(s, a));
+                return make_tcon(n.name, std::move(args));
+            } else if constexpr (std::is_same_v<T, TypeFun>) {
+                return make_tfun(apply_renaming(s, n.param), apply_renaming(s, n.ret));
+            } else {
+                std::vector<TypePtr> elems;
+                elems.reserve(n.elems.size());
+                for (const auto& e : n.elems) elems.push_back(apply_renaming(s, e));
+                return make_ttuple(std::move(elems));
+            }
+        },
+        t->node);
+}
+
 TypePtr instantiate(const TypeScheme& scheme, TypeVarGen& gen) {
     if (scheme.quantified.empty()) {
         return scheme.type;
@@ -92,7 +117,7 @@ TypePtr instantiate(const TypeScheme& scheme, TypeVarGen& gen) {
     for (uint32_t q : scheme.quantified) {
         s[q] = gen.fresh();
     }
-    return apply_subst(s, scheme.type);
+    return apply_renaming(s, scheme.type);
 }
 
 TypeScheme generalize(const std::set<uint32_t>& env_free_vars, const TypePtr& t) {

@@ -42,7 +42,7 @@ let parse_request raw =
 
 let header_get name headers =
   let target = str_lower name
-  match core.list_find (fn kv -> match kv with | (k, _) -> k == target) headers with
+  match core.list_find (func kv -> match kv with | (k, _) -> k == target) headers with
   | None -> core.None
   | Some (_, v) -> core.Some v
 
@@ -63,7 +63,7 @@ let format_response res =
         "HTTP/1.1 " ++ to_string status ++ " " ++ status_reason status ++ "\r\n"
       let len_hdr = "Content-Length: " ++ to_string (str_len body) ++ "\r\n"
       let conn_hdr = "Connection: close\r\n"
-      let hdr_strs = core.list_map (fn kv -> match kv with | (k, v) -> k ++ ": " ++ v ++ "\r\n") headers
+      let hdr_strs = core.list_map (func kv -> match kv with | (k, v) -> k ++ ": " ++ v ++ "\r\n") headers
       str_concat_list (list_append [status_line, len_hdr, conn_hdr] (list_append hdr_strs ["\r\n", body]))
 
 let ok_text body = Res 200 [("Content-Type", "text/plain; charset=utf-8")] body

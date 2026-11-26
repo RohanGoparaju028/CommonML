@@ -11,7 +11,7 @@
   :group 'languages)
 
 (defconst cml-keywords
-  '("let" "var" "rec" "in" "fn" "if" "then" "else" "match" "with"
+  '("let" "var" "rec" "in" "func" "if" "then" "else" "match" "with"
     "type" "struct" "macro" "quote" "import" "new" "defer" "close"
     "while" "for" "each" "break" "continue" "begin" "end"))
 

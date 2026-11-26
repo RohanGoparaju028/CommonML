@@ -23,7 +23,7 @@ enum class TokenKind {
     KwVar,
     KwRec,
     KwIn,
-    KwFn,
+    KwFunc,
     KwIf,
     KwThen,
     KwElse,

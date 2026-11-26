@@ -10,9 +10,9 @@ CommonML blends **ML-family functional programming** (Hindley-Milner type infere
 ## Your first program
 
 ```text
-let main = fn() : i32:
-  println "Hello from CommonML!"
-  0
+let main = func() -> i32:
+             println "Hello from CommonML!"
+             0
 
 main ()
 ```
@@ -31,18 +31,18 @@ Structs use indented `field: type` blocks, and heap allocations via `new` return
 
 ```text
 let rect = struct:
-  x: i32
-  y: i32
-  label: str
-  active: bool
+             x: i32
+             y: i32
+             label: str
+             active: bool
 
-let area = fn() : i32:
-  let var_rect = new rect { .x = 10, .y = 20, .label = "box", .active = true }
-  defer close var_rect
-  if var_rect->active =
-    var_rect->x * var_rect->y
-  else =
-    0
+let area = func() -> i32:
+             let var_rect = new rect { .x = 10, .y = 20, .label = "box", .active = true }
+             defer close var_rect
+             if var_rect->active =
+               var_rect->x * var_rect->y
+             else =
+               0
 
 area ()
 ```

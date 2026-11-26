@@ -93,7 +93,7 @@ StmtPtr Parser::parse_stmt(bool in_block) {
         return parse_type_decl();
     }
     if (check(TokenKind::KwStruct)) {
-        return parse_struct_decl();
+        error(peek(), "structs must be assigned with 'let <name> = struct:'");
     }
     if (check(TokenKind::KwLet)) {
         return parse_let_stmt(in_block);
@@ -196,7 +196,7 @@ StmtPtr Parser::parse_type_decl() {
 }
 
 StmtPtr Parser::parse_struct_body(const SourceSpan& start_span, const Ident& struct_name,
-                                  std::vector<Ident> type_params) {
+                                  std::vector<Ident> type_params, size_t kw_col) {
     std::vector<StructFieldDecl> fields;
     SourceSpan end_span = struct_name.span;
 
@@ -223,7 +223,10 @@ StmtPtr Parser::parse_struct_body(const SourceSpan& start_span, const Ident& str
         end_span = rb.span;
     } else if (starts_indented_block()) {
         match(TokenKind::Newline);
-        expect(TokenKind::Indent, "expected indented struct fields");
+        const Token& ind = expect(TokenKind::Indent, "expected indented struct fields");
+        if (kw_col > 0 && ind.span.column <= kw_col) {
+            error(ind, "struct fields must be indented relative to 'struct' keyword");
+        }
         while (!check(TokenKind::Dedent) && !at_end()) {
             skip_stmt_seps();
             if (check(TokenKind::Dedent) || at_end()) break;
@@ -244,23 +247,6 @@ StmtPtr Parser::parse_struct_body(const SourceSpan& start_span, const Ident& str
     SourceSpan span = SourceSpan::merge(start_span, end_span);
     return std::make_shared<Stmt>(
         Stmt{StmtStructDecl{struct_name, std::move(type_params), std::move(fields)}, span});
-}
-
-StmtPtr Parser::parse_struct_decl() {
-    const Token& kw = expect(TokenKind::KwStruct, "expected 'struct'");
-    const Token& name_tok =
-        (check(TokenKind::UpperIdent) || check(TokenKind::LowerIdent))
-            ? advance()
-            : expect(TokenKind::UpperIdent, "expected struct name");
-    Ident struct_name{name_tok.lexeme, {}, name_tok.span};
-
-    std::vector<Ident> type_params;
-    while (check(TokenKind::LowerIdent)) {
-        const Token& tp = advance();
-        type_params.push_back(Ident{tp.lexeme, {}, tp.span});
-    }
-
-    return parse_struct_body(kw.span, struct_name, std::move(type_params));
 }
 
 Parser::Param Parser::parse_param() {
@@ -298,18 +284,24 @@ StmtPtr Parser::parse_let_stmt(bool in_block) {
     const Token& kw = expect(TokenKind::KwLet, "expected 'let'");
     bool is_rec = match(TokenKind::KwRec);
 
-    if (!is_rec && (check(TokenKind::LowerIdent) || check(TokenKind::UpperIdent)) &&
-        peek(1).kind == TokenKind::Eq && peek(2).kind == TokenKind::KwStruct) {
-        const Token& sname = advance();
-        advance();  // '='
-        advance();  // 'struct'
-        std::vector<Ident> type_params;
-        while (check(TokenKind::LowerIdent)) {
-            const Token& tp = advance();
-            type_params.push_back(Ident{tp.lexeme, {}, tp.span});
+    if (!is_rec && (check(TokenKind::LowerIdent) || check(TokenKind::UpperIdent))) {
+        size_t scan = pos_ + 1;
+        while (scan < tokens_.size() && tokens_[scan].kind == TokenKind::LowerIdent) {
+            ++scan;
         }
-        return parse_struct_body(kw.span, Ident{sname.lexeme, {}, sname.span},
-                                 std::move(type_params));
+        if (scan + 1 < tokens_.size() && tokens_[scan].kind == TokenKind::Eq &&
+            tokens_[scan + 1].kind == TokenKind::KwStruct) {
+            const Token& sname = advance();
+            std::vector<Ident> type_params;
+            while (check(TokenKind::LowerIdent)) {
+                const Token& tp = advance();
+                type_params.push_back(Ident{tp.lexeme, {}, tp.span});
+            }
+            expect(TokenKind::Eq, "expected '=' before 'struct'");
+            const Token& skw = expect(TokenKind::KwStruct, "expected 'struct'");
+            return parse_struct_body(kw.span, Ident{sname.lexeme, {}, sname.span},
+                                     std::move(type_params), skw.span.column);
+        }
     }
 
     PatternPtr pat;
@@ -587,9 +579,12 @@ PatternPtr Parser::parse_pat_atom() {
     error(tok, "expected pattern");
 }
 
-ExprPtr Parser::parse_block() {
+ExprPtr Parser::parse_block(size_t min_indent_col) {
     match(TokenKind::Newline);
     const Token& ind = expect(TokenKind::Indent, "expected indented block");
+    if (min_indent_col > 0 && ind.span.column <= min_indent_col) {
+        error(ind, "expected block indented relative to keyword column");
+    }
     std::vector<StmtPtr> stmts;
     SourceSpan end_span = ind.span;
 
@@ -606,9 +601,9 @@ ExprPtr Parser::parse_block() {
     return std::make_shared<Expr>(Expr{ExprBlock{std::move(stmts)}, span});
 }
 
-ExprPtr Parser::parse_block_or_expr() {
+ExprPtr Parser::parse_block_or_expr(size_t min_indent_col) {
     if (starts_indented_block()) {
-        return parse_block();
+        return parse_block(min_indent_col);
     }
     return parse_expr();
 }
@@ -626,8 +621,8 @@ ExprPtr Parser::parse_expr() {
     if (check(TokenKind::KwLet)) {
         return parse_let_expr();
     }
-    if (check(TokenKind::KwFn)) {
-        return parse_fn_expr();
+    if (check(TokenKind::KwFunc)) {
+        return parse_func_expr();
     }
     if (check(TokenKind::KwIf)) {
         return parse_if_expr();
@@ -703,8 +698,8 @@ ExprPtr Parser::parse_let_expr() {
              span});
 }
 
-ExprPtr Parser::parse_fn_expr() {
-    const Token& kw = expect(TokenKind::KwFn, "expected 'fn'");
+ExprPtr Parser::parse_func_expr() {
+    const Token& kw = expect(TokenKind::KwFunc, "expected 'func'");
     std::vector<Param> params;
     std::optional<TypeExprPtr> ret_ann;
 
@@ -720,7 +715,7 @@ ExprPtr Parser::parse_fn_expr() {
                 uspan,
             });
         } else {
-            // Disambiguate `fn(a: T, b: T)` / `fn(a, b) : Ret:` vs ML `fn (a, b) -> ...`
+            // Disambiguate `func(a: T, b: T)` / `func(a, b) -> Ret:` vs ML `func (a, b) -> ...`
             bool is_param_list = false;
             int depth = 1;
             bool saw_colon_at_depth1 = false;
@@ -742,6 +737,21 @@ ExprPtr Parser::parse_fn_expr() {
                 TokenKind after = tokens_[scan + 1].kind;
                 if (after == TokenKind::Colon || after == TokenKind::Eq) {
                     is_param_list = true;
+                } else if (after == TokenKind::Arrow) {
+                    // Check if `->` is followed by `<Type> (: | = | indented block)`
+                    size_t probe_saved = pos_;
+                    pos_ = scan + 2;
+                    if (!starts_indented_block()) {
+                        try {
+                            (void)parse_type();
+                            if (check(TokenKind::Colon) || check(TokenKind::Eq) ||
+                                starts_indented_block()) {
+                                is_param_list = true;
+                            }
+                        } catch (const CompileError&) {
+                        }
+                    }
+                    pos_ = probe_saved;
                 }
             }
 
@@ -775,24 +785,36 @@ ExprPtr Parser::parse_fn_expr() {
     }
 
     bool body_delim_matched = false;
-    if (match(TokenKind::Colon)) {
-        if (starts_indented_block()) {
-            body_delim_matched = true;
-        } else {
-            ret_ann = parse_type();
-            if (match(TokenKind::Colon) || match(TokenKind::Eq) || match(TokenKind::Arrow)) {
-                body_delim_matched = true;
+    if (match(TokenKind::Arrow)) {
+        size_t after_arrow = pos_;
+        bool parsed_ret_type = false;
+        if (!starts_indented_block()) {
+            try {
+                TypeExprPtr candidate = parse_type();
+                if (check(TokenKind::Colon) || check(TokenKind::Eq) ||
+                    starts_indented_block()) {
+                    ret_ann = std::move(candidate);
+                    if (check(TokenKind::Colon) || check(TokenKind::Eq)) {
+                        advance();
+                    }
+                    parsed_ret_type = true;
+                }
+            } catch (const CompileError&) {
             }
         }
-    } else if (match(TokenKind::Arrow) || match(TokenKind::Eq)) {
+        if (!parsed_ret_type) {
+            pos_ = after_arrow;
+        }
+        body_delim_matched = true;
+    } else if (match(TokenKind::Colon) || match(TokenKind::Eq)) {
         body_delim_matched = true;
     }
 
     if (!body_delim_matched && !starts_indented_block()) {
-        error(peek(), "expected '->', '=', ':' or indented block in fn expression");
+        error(peek(), "expected '->', '=', ':' or indented block in func expression");
     }
 
-    ExprPtr body = parse_block_or_expr();
+    ExprPtr body = parse_block_or_expr(kw.span.column);
     ExprPtr fn = wrap_fn_params(params, ret_ann, body);
     return std::make_shared<Expr>(Expr{fn->node, SourceSpan::merge(kw.span, body->span)});
 }
@@ -994,7 +1016,7 @@ ExprPtr Parser::parse_binary(int min_prec) {
         advance();
         int next_min = info->right_assoc ? info->prec : info->prec + 1;
         ExprPtr right = (info->op == BinaryOp::Pipe &&
-                         (check(TokenKind::KwFn) || check(TokenKind::KwIf) ||
+                         (check(TokenKind::KwFunc) || check(TokenKind::KwIf) ||
                           check(TokenKind::KwLet) || check(TokenKind::KwMatch)))
                             ? parse_expr()
                             : parse_binary(next_min);

@@ -1,0 +1,285 @@
+-- Stage 2 Compile-Time Module Loader & Bundler
+let core = import "std/core"
+let ast = import "ast.cml"
+let lex = import "lexer.cml"
+let prs = import "parser.cml"
+
+let str_rfind_slash s =
+  let rec go i =
+    if i < 0 then -1
+    else
+      let b = str_byte_at s i in
+      if b == 47 || b == 92 then i else go (i - 1)
+  in
+  go (str_len s - 1)
+
+let path_dirname p =
+  let idx = str_rfind_slash p in
+  if idx < 0 then "."
+  else if idx == 0 then "/"
+  else str_sub p 0 idx
+
+let path_join dir file =
+  if dir == "" || dir == "." then file
+  else if str_byte_at dir (str_len dir - 1) == 47 then dir ++ file
+  else dir ++ "/" ++ file
+
+let starts_with s prefix =
+  let ns = str_len s in
+  let np = str_len prefix in
+  if ns < np then false
+  else str_sub s 0 np == prefix
+
+let ends_with s suffix =
+  let ns = str_len s in
+  let np = str_len suffix in
+  if ns < np then false
+  else str_sub s (ns - np) np == suffix
+
+let normalize_path p =
+  let n = str_len p in
+  let rec split_parts i start acc =
+    if i >= n then
+      let part = str_sub p start (n - start) in
+      list_rev (if part == "" then acc else part :: acc)
+    else if str_byte_at p i == 47 then
+      let part = str_sub p start (i - start) in
+      split_parts (i + 1) (i + 1) (if part == "" then acc else part :: acc)
+    else split_parts (i + 1) start acc
+  in
+  let parts = split_parts 0 0 [] in
+  let rec norm_stack xs stk =
+    match xs with
+    | [] -> list_rev stk
+    | h :: t ->
+        if h == "." then norm_stack t stk
+        else if h == ".." then
+          if not (is_empty stk) && head stk != ".." then norm_stack t (tail stk)
+          else norm_stack t (".." :: stk)
+        else norm_stack t (h :: stk)
+  in
+  let clean = norm_stack parts [] in
+  let is_abs = n > 0 && str_byte_at p 0 == 47 in
+  let rec join_parts xs first acc =
+    match xs with
+    | [] -> if is_abs && acc == "" then "/" else if acc == "" then "." else acc
+    | h :: t ->
+        let sep = if first then (if is_abs then "/" else "") else "/" in
+        join_parts t false (acc ++ sep ++ h)
+  in
+  join_parts clean true ""
+
+let resolve_import spec from_file stdlib_dir =
+  let spec_cml = if ends_with spec ".cml" then spec else spec ++ ".cml" in
+  if starts_with spec "std/" then
+    let sub = str_sub spec 4 (str_len spec - 4) in
+    let sub_cml = if ends_with sub ".cml" then sub else sub ++ ".cml" in
+    let cand = path_join stdlib_dir sub_cml in
+    if file_exists cand then normalize_path cand
+    else panic ("stage2 import error: could not find stdlib module '" ++ spec ++ "'")
+  else
+    let base_dir = path_dirname from_file in
+    let cand1 = path_join base_dir spec_cml in
+    if file_exists cand1 then normalize_path cand1
+    else if file_exists spec_cml then normalize_path spec_cml
+    else
+      let cand2 = path_join stdlib_dir spec_cml in
+      if file_exists cand2 then normalize_path cand2
+      else panic ("stage2 import error: could not find module '" ++ spec ++ "' from '" ++ from_file ++ "'")
+
+let rec collect_pat_names pat acc =
+  match pat with
+  | PVar nm -> nm :: acc
+  | PTuple ps -> core.list_foldl (func a p -> collect_pat_names p a) acc ps
+  | PList ps -> core.list_foldl (func a p -> collect_pat_names p a) acc ps
+  | PCons hd tl -> collect_pat_names tl (collect_pat_names hd acc)
+  | PCtor _ ps -> core.list_foldl (func a p -> collect_pat_names p a) acc ps
+  | _ -> acc
+
+let rec lookup_rmap nm rmap =
+  match rmap with
+  | [] -> nm
+  | (k, v) :: rest -> if k == nm then v else lookup_rmap nm rest
+
+let filter_rmap shadowed rmap =
+  core.list_filter (func kv ->
+    match kv with
+    | (k, _) -> not (core.list_any (func s -> s == k) shadowed)
+  ) rmap
+
+let rec lookup_assoc key xs =
+  match xs with
+  | [] -> None
+  | (k, v) :: rest -> if k == key then Some v else lookup_assoc key rest
+
+let filter_mod_map shadowed mmap =
+  core.list_filter (func kv ->
+    match kv with
+    | (k, _) -> not (core.list_any (func s -> s == k) shadowed)
+  ) mmap
+
+let rec rename_expr e rmap mmap =
+  match e with
+  | EVar nm -> EVar (lookup_rmap nm rmap)
+  | EFieldGet obj fld ->
+      (match obj with
+      | EVar alias ->
+          (match lookup_assoc alias mmap with
+          | Some exp_list ->
+              (match lookup_assoc fld exp_list with
+              | Some target_e -> target_e
+              | None -> panic ("stage2 import error: module '" ++ alias ++ "' has no member '" ++ fld ++ "'"))
+          | None -> EFieldGet (rename_expr obj rmap mmap) fld)
+      | _ -> EFieldGet (rename_expr obj rmap mmap) fld)
+  | ETuple es -> ETuple (core.list_map (func x -> rename_expr x rmap mmap) es)
+  | EList es -> EList (core.list_map (func x -> rename_expr x rmap mmap) es)
+  | EUnary op x -> EUnary op (rename_expr x rmap mmap)
+  | EBin op l r -> EBin op (rename_expr l rmap mmap) (rename_expr r rmap mmap)
+  | EIf c t f -> EIf (rename_expr c rmap mmap) (rename_expr t rmap mmap) (rename_expr f rmap mmap)
+  | EWhile c b -> EWhile (rename_expr c rmap mmap) (rename_expr b rmap mmap)
+  | EForEach pat col b ->
+      let sh = collect_pat_names pat [] in
+      EForEach pat (rename_expr col rmap mmap) (rename_expr b (filter_rmap sh rmap) (filter_mod_map sh mmap))
+  | ELet is_rec pat v b ->
+      let sh = collect_pat_names pat [] in
+      let rm_b = filter_rmap sh rmap in
+      let mm_b = filter_mod_map sh mmap in
+      let rm_v = if is_rec then rm_b else rmap in
+      let mm_v = if is_rec then mm_b else mmap in
+      ELet is_rec pat (rename_expr v rm_v mm_v) (rename_expr b rm_b mm_b)
+  | EVarBind pat v b ->
+      let sh = collect_pat_names pat [] in
+      EVarBind pat (rename_expr v rmap mmap) (rename_expr b (filter_rmap sh rmap) (filter_mod_map sh mmap))
+  | EAssign nm rhs -> EAssign (lookup_rmap nm rmap) (rename_expr rhs rmap mmap)
+  | EFn pat ann_opt b ->
+      let sh = collect_pat_names pat [] in
+      EFn pat ann_opt (rename_expr b (filter_rmap sh rmap) (filter_mod_map sh mmap))
+  | EApp f a -> EApp (rename_expr f rmap mmap) (rename_expr a rmap mmap)
+  | EMatch sc arms ->
+      let sc1 = rename_expr sc rmap mmap in
+      let arms1 =
+        core.list_map (func arm ->
+          match arm with
+          | (p, b) ->
+              let sh = collect_pat_names p [] in
+              (p, rename_expr b (filter_rmap sh rmap) (filter_mod_map sh mmap))
+        ) arms
+      in
+      EMatch sc1 arms1
+  | EAnnot x te -> EAnnot (rename_expr x rmap mmap) te
+  | EStructLit sn fs ->
+      EStructLit sn (core.list_map (func kv -> match kv with | (fnm, fv) -> (fnm, rename_expr fv rmap mmap)) fs)
+  | EFieldSet obj fld rhs -> EFieldSet (rename_expr obj rmap mmap) fld (rename_expr rhs rmap mmap)
+  | ENew x -> ENew (rename_expr x rmap mmap)
+  | EClose x -> EClose (rename_expr x rmap mmap)
+  | EScopeDefer a b -> EScopeDefer (rename_expr a rmap mmap) (rename_expr b rmap mmap)
+  | EDerefSet p v -> EDerefSet (rename_expr p rmap mmap) (rename_expr v rmap mmap)
+  | EPtrFieldGet p fld -> EPtrFieldGet (rename_expr p rmap mmap) fld
+  | EPtrFieldSet p fld rhs -> EPtrFieldSet (rename_expr p rmap mmap) fld (rename_expr rhs rmap mmap)
+  | _ -> e
+
+let contains_str s xs = core.list_any (func x -> x == s) xs
+
+-- State: (next_mod_id, loaded_mods [(path, export_list)], seen_types [name], seen_structs [name], out_stmts)
+let bundle_entry entry_file stdlib_dir =
+  let rec load_file fpath is_entry st =
+    let norm = normalize_path fpath in
+    let (mid_cur, loaded0, stypes0, sstructs0, out0) = st in
+    let cached = if is_entry then None else lookup_assoc norm loaded0 in
+    match cached with
+    | Some exps -> (exps, st)
+    | None ->
+        let mod_id = mid_cur in
+        let prefix = if is_entry then "" else "__m" ++ to_string mod_id ++ "_" in
+        let st1 = (mid_cur + 1, loaded0, stypes0, sstructs0, out0) in
+        let src = read_file norm in
+        let toks = lex.lex_source src in
+        let raw_stmts = prs.parse_program_tokens toks in
+        let rec proc_stmts i s_acc rmap mmap exports cur_st =
+          if i >= list_len raw_stmts then (list_rev s_acc, list_rev exports, cur_st)
+          else
+            match list_nth raw_stmts i with
+            | SType tname ctors ->
+                let (_, _, tys, _, _) = cur_st in
+                let ctor_exps = core.list_map (func c -> match c with | (cn, _) -> (cn, ECtor cn)) ctors in
+                let next_exp = list_append (list_rev ctor_exps) exports in
+                if contains_str tname tys then
+                  proc_stmts (i + 1) s_acc rmap mmap next_exp cur_st
+                else
+                  let st_n = match cur_st with | (a, b, c, d, e) -> (a, b, tname :: c, d, e) in
+                  proc_stmts (i + 1) (SType tname ctors :: s_acc) rmap mmap next_exp st_n
+            | SStruct sname fdecls ->
+                let (_, _, _, sts, _) = cur_st in
+                if contains_str sname sts then
+                  proc_stmts (i + 1) s_acc rmap mmap exports cur_st
+                else
+                  let st_n = match cur_st with | (a, b, c, d, e) -> (a, b, c, sname :: d, e) in
+                  proc_stmts (i + 1) (SStruct sname fdecls :: s_acc) rmap mmap exports st_n
+            | SLet is_rec pat val_e ->
+                (match val_e with
+                | EImport spec ->
+                    let target = resolve_import spec norm stdlib_dir in
+                    let (dep_exps, next_st) = load_file target false cur_st in
+                    let alias = match pat with | PVar nm -> nm | _ -> panic "import requires variable name" in
+                    let mmap1 = (alias, dep_exps) :: mmap in
+                    proc_stmts (i + 1) s_acc rmap mmap1 exports next_st
+                | _ ->
+                    let names = collect_pat_names pat [] in
+                    let new_pairs =
+                      if prefix == "" then []
+                      else core.list_map (func nm -> (nm, prefix ++ nm)) names
+                    in
+                    let rmap_after = list_append new_pairs rmap in
+                    let rmap_val = if is_rec then rmap_after else rmap in
+                    let val1 = rename_expr val_e rmap_val mmap in
+                    let rec ren_pat p =
+                      match p with
+                      | PVar nm -> PVar (lookup_rmap nm rmap_after)
+                      | PTuple ps -> PTuple (core.list_map ren_pat ps)
+                      | PList ps -> PList (core.list_map ren_pat ps)
+                      | PCons h t -> PCons (ren_pat h) (ren_pat t)
+                      | PCtor c ps -> PCtor c (core.list_map ren_pat ps)
+                      | _ -> p
+                    in
+                    let pat1 = if prefix == "" then pat else ren_pat pat in
+                    let new_exps =
+                      core.list_map (func nm -> (nm, EVar (lookup_rmap nm rmap_after))) names
+                    in
+                    proc_stmts (i + 1) (SLet is_rec pat1 val1 :: s_acc) rmap_after mmap (list_append (list_rev new_exps) exports) cur_st)
+            | SVar pat val_e ->
+                let names = collect_pat_names pat [] in
+                let new_pairs =
+                  if prefix == "" then []
+                  else core.list_map (func nm -> (nm, prefix ++ nm)) names
+                in
+                let rmap_after = list_append new_pairs rmap in
+                let val1 = rename_expr val_e rmap mmap in
+                let rec ren_pat p =
+                  match p with
+                  | PVar nm -> PVar (lookup_rmap nm rmap_after)
+                  | PTuple ps -> PTuple (core.list_map ren_pat ps)
+                  | PList ps -> PList (core.list_map ren_pat ps)
+                  | PCons h t -> PCons (ren_pat h) (ren_pat t)
+                  | PCtor c ps -> PCtor c (core.list_map ren_pat ps)
+                  | _ -> p
+                in
+                let pat1 = if prefix == "" then pat else ren_pat pat in
+                let new_exps =
+                  core.list_map (func nm -> (nm, EVar (lookup_rmap nm rmap_after))) names
+                in
+                proc_stmts (i + 1) (SVar pat1 val1 :: s_acc) rmap_after mmap (list_append (list_rev new_exps) exports) cur_st
+            | SDefer act ->
+                let act1 = rename_expr act rmap mmap in
+                proc_stmts (i + 1) (SDefer act1 :: s_acc) rmap mmap exports cur_st
+            | SExpr ex ->
+                let ex1 = rename_expr ex rmap mmap in
+                proc_stmts (i + 1) (SExpr ex1 :: s_acc) rmap mmap exports cur_st
+        in
+        let (mod_stmts, mod_exps, st2) = proc_stmts 0 [] [] [] [] st1 in
+        let (a2, b2, c2, d2, outs2) = st2 in
+        let b3 = if is_entry then b2 else (norm, mod_exps) :: b2 in
+        let final_stmts = list_append outs2 mod_stmts in
+        (mod_exps, (a2, b3, c2, d2, final_stmts))
+  in
+  let (_, (_, _, _, _, all_stmts)) = load_file entry_file true (0, [], [], [], []) in
+  all_stmts

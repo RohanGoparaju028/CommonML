@@ -81,7 +81,7 @@
         },
         {
           "name": "keyword.declaration.commonml",
-          "match": "\\b(let|var|rec|in|fn|type|struct|macro|quote|new)\\b"
+          "match": "\\b(let|var|rec|in|func|type|struct|macro|quote|new)\\b"
         },
         {
           "name": "storage.type.primitive.commonml",

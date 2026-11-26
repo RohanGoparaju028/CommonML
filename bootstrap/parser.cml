@@ -52,6 +52,10 @@ let ps_set_pipe_stop flag st =
   match st with
   | PS toks pos top_col delim _ _ -> PS toks pos top_col delim flag delim
 
+let ps_restore_pipe_stop flag md st =
+  match st with
+  | PS toks pos top_col delim _ _ -> PS toks pos top_col delim flag md
+
 let ps_should_stop_pipe st =
   match st with
   | PS _ _ _ delim sp md -> sp && delim == md
@@ -186,53 +190,67 @@ let starts_atom_kind k =
 
 type TyMode = TMTop | TMTuple | TMApp | TMAtom
 
-let rec parse_type_mode mode st =
+let rec try_type_mode mode st =
   match mode with
   | TMTop ->
-      let (l, s1) = parse_type_mode TMTuple st in
-      if ps_kind s1 == TKArrow then
-        let (r, s2) = parse_type_mode TMTop (ps_adv s1) in
-        (TEFun l r, s2)
-      else (l, s1)
+      match try_type_mode TMTuple st with
+      | None -> None
+      | Some (l, s1) ->
+          if ps_kind s1 == TKArrow then
+            match try_type_mode TMTop (ps_adv s1) with
+            | None -> None
+            | Some (r, s2) -> Some (TEFun l r, s2)
+          else Some (l, s1)
   | TMTuple ->
-      let (first, s1) = parse_type_mode TMApp st in
-      if ps_kind s1 != TKStar then (first, s1)
-      else
-        let rec read_ts s acc =
-          if ps_kind s == TKStar then
-            let (e, s2) = parse_type_mode TMApp (ps_adv s) in
-            read_ts s2 (e :: acc)
-          else (TETuple (list_rev acc), s)
-        in
-        read_ts s1 [first]
+      match try_type_mode TMApp st with
+      | None -> None
+      | Some (first, s1) ->
+          if ps_kind s1 != TKStar then Some (first, s1)
+          else
+            let rec read_ts s acc =
+              if ps_kind s == TKStar then
+                match try_type_mode TMApp (ps_adv s) with
+                | None -> None
+                | Some (e, s2) -> read_ts s2 (e :: acc)
+              else Some (TETuple (list_rev acc), s)
+            in
+            read_ts s1 [first]
   | TMApp ->
       if ps_kind st == TKUpper then
         let cname = ps_lexeme st in
         let rec read_args s acc =
           let k = ps_kind s in
           if k == TKLower || k == TKUpper || k == TKLParen || k == TKStar then
-            let (a, s1) = parse_type_mode TMAtom s in
-            read_args s1 (a :: acc)
-          else (TECon cname (list_rev acc), s)
+            match try_type_mode TMAtom s with
+            | None -> None
+            | Some (a, s1) -> read_args s1 (a :: acc)
+          else Some (TECon cname (list_rev acc), s)
         in
         read_args (ps_adv st) []
-      else parse_type_mode TMAtom st
+      else try_type_mode TMAtom st
   | TMAtom ->
       if ps_kind st == TKStar then
-        let (inner, s1) = parse_type_mode TMAtom (ps_adv st) in
-        (TEPtr inner, s1)
+        match try_type_mode TMAtom (ps_adv st) with
+        | None -> None
+        | Some (inner, s1) -> Some (TEPtr inner, s1)
       else if ps_kind st == TKLower || ps_kind st == TKUpper then
-        (TECon (ps_lexeme st) [], ps_adv st)
+        Some (TECon (ps_lexeme st) [], ps_adv st)
       else if ps_kind st == TKLParen then
         let s1 = ps_enter_delim (ps_adv st) in
-        let (t, s2) = parse_type_mode TMTop s1 in
-        let (_, s3) = ps_expect TKRParen "expected ')' in type" s2 in
-        (t, ps_leave_delim s3)
-      else
-        panic ("bootstrap parse error: expected type, got '" ++ ps_lexeme st ++ "'")
+        match try_type_mode TMTop s1 with
+        | None -> None
+        | Some (t, s2) ->
+            if ps_kind s2 == TKRParen then Some (t, ps_leave_delim (ps_adv s2))
+            else None
+      else None
+
+let parse_type_mode mode st =
+  match try_type_mode mode st with
+  | Some res -> res
+  | None -> panic ("bootstrap parse error: expected type, got '" ++ ps_lexeme st ++ "'")
 
 type ExprMode =
-  | EMSeq | EMBlockOrExpr | EMBlock | EMExpr | EMLet | EMFn | EMIf | EMMatch
+  | EMSeq | EMBlockOrExpr | EMBlock Int | EMExpr | EMLet | EMFunc | EMIf | EMMatch
   | EMBin Int | EMUnary | EMApp | EMPostfix | EMAtom
 
 let wrap_params params body =
@@ -252,11 +270,17 @@ let rec parse_expr_mode mode st =
         (EBin BSeq left right, st3)
       else (left, st1)
   | EMBlockOrExpr ->
-      if ps_starts_block st then parse_expr_mode EMBlock st
+      if ps_starts_block st then parse_expr_mode (EMBlock 0) st
       else parse_expr_mode EMExpr st
-  | EMBlock ->
+  | EMBlock min_col ->
       let s0 = if ps_kind st == TKNewline then ps_adv st else st in
-      let (_, s1) = ps_expect TKIndent "expected indent in block" s0 in
+      let (ind_tok, s1) = ps_expect TKIndent "expected indent in block" s0 in
+      let ind_col = match ind_tok with | BTok _ _ _ _ _ c -> c in
+      let _ =
+        if min_col > 0 && ind_col <= min_col then
+          panic "bootstrap parse error: expected block indented relative to keyword column"
+        else ()
+      in
       let rec read_lines s acc =
         let sx = ps_skip_seps s in
         if ps_kind sx == TKDedent || ps_kind sx == TKEof then (list_rev acc, sx)
@@ -344,7 +368,7 @@ let rec parse_expr_mode mode st =
   | EMExpr ->
       let k = ps_kind st in
       if k == TKKwLet then parse_expr_mode EMLet st
-      else if k == TKKwFn then parse_expr_mode EMFn st
+      else if k == TKKwFunc then parse_expr_mode EMFunc st
       else if k == TKKwIf then parse_expr_mode EMIf st
       else if k == TKKwMatch then parse_expr_mode EMMatch st
       else parse_expr_mode (EMBin 1) st
@@ -374,7 +398,8 @@ let rec parse_expr_mode mode st =
       let st6n = if ps_kind st6 == TKNewline && not (ps_starts_block st6) then ps_adv st6 else st6 in
       let (body, st7) = parse_expr_mode EMBlockOrExpr st6n in
       (ELet is_rec pat val_e body, st7)
-  | EMFn ->
+  | EMFunc ->
+      let kw_col = ps_col st in
       let st1 = ps_adv st in
       let (params, param_ann_wraps, st2) =
         if ps_kind st1 == TKLParen && ps_kind (ps_adv st1) == TKRParen then
@@ -388,8 +413,17 @@ let rec parse_expr_mode mode st =
             else if k == TKLParen then scan_has_colon (ps_adv s) (depth + 1)
             else if k == TKRParen then
               if depth == 1 then
-                let after = ps_kind (ps_adv s) in
-                (false, after == TKColon || after == TKEq)
+                let s_after = ps_adv s in
+                let after = ps_kind s_after in
+                let is_ret_arrow =
+                  if after == TKArrow && not (ps_starts_block (ps_adv s_after)) then
+                    match try_type_mode TMTop (ps_adv s_after) with
+                    | Some (_, s_rt) ->
+                        ps_kind s_rt == TKColon || ps_kind s_rt == TKEq || ps_starts_block s_rt
+                    | None -> false
+                  else false
+                in
+                (false, after == TKColon || after == TKEq || is_ret_arrow)
               else scan_has_colon (ps_adv s) (depth - 1)
             else if depth == 1 && k == TKColon then (true, true)
             else scan_has_colon (ps_adv s) depth
@@ -428,21 +462,24 @@ let rec parse_expr_mode mode st =
           read_ps st1 []
       in
       let (ret_ann, st3) =
-        if ps_kind st2 == TKColon then
-          let after_col = ps_adv st2 in
-          if ps_starts_block after_col then (None, after_col)
+        if ps_kind st2 == TKArrow then
+          let after_arrow = ps_adv st2 in
+          if ps_starts_block after_arrow then (None, after_arrow)
           else
-            let (rt, s_rt) = parse_type_mode TMTop after_col in
-            let s_bd =
-              if ps_kind s_rt == TKColon || ps_kind s_rt == TKEq || ps_kind s_rt == TKArrow then ps_adv s_rt
-              else s_rt
-            in
-            (Some rt, s_bd)
-        else if ps_kind st2 == TKArrow || ps_kind st2 == TKEq then
+            match try_type_mode TMTop after_arrow with
+            | Some (rt, s_rt) ->
+                if ps_kind s_rt == TKColon || ps_kind s_rt == TKEq then (Some rt, ps_adv s_rt)
+                else if ps_starts_block s_rt then (Some rt, s_rt)
+                else (None, after_arrow)
+            | None -> (None, after_arrow)
+        else if ps_kind st2 == TKColon || ps_kind st2 == TKEq then
           (None, ps_adv st2)
         else (None, st2)
       in
-      let (raw_body, st4) = parse_expr_mode EMBlockOrExpr st3 in
+      let (raw_body, st4) =
+        if ps_starts_block st3 then parse_expr_mode (EMBlock kw_col) st3
+        else parse_expr_mode EMExpr st3
+      in
       let body0 = match ret_ann with | None -> raw_body | Some rt -> EAnnot raw_body rt in
       let _ = param_ann_wraps in
       (wrap_params params body0, st4)
@@ -481,9 +518,9 @@ let rec parse_expr_mode mode st =
       let rec read_arms s acc =
         let (p, s1) = parse_pat_mode PMTop s in
         let (_, s2) = ps_expect TKArrow "expected '->' in match arm" s1 in
-        let old_sp = match s2 with | PS _ _ _ _ sp _ -> sp in
+        let (old_sp, old_md) = match s2 with | PS _ _ _ _ sp md -> (sp, md) in
         let (b, s3) = parse_expr_mode EMBlockOrExpr (ps_set_pipe_stop true s2) in
-        let s3r = ps_set_pipe_stop old_sp s3 in
+        let s3r = ps_restore_pipe_stop old_sp old_md s3 in
         if ps_kind s3r == TKPipe then read_arms (ps_adv s3r) ((p, b) :: acc)
         else if ps_kind s3r == TKNewline && ps_kind (ps_adv s3r) == TKPipe then
           read_arms (ps_adv (ps_adv s3r)) ((p, b) :: acc)
@@ -704,7 +741,7 @@ let parse_type_decl st =
   in
   (SType tname ctors, s_done)
 
-let parse_struct_body_stmt sname st =
+let parse_struct_body_stmt sname kw_col st =
   let s0 = if ps_kind st == TKColon || ps_kind st == TKEq then ps_adv st else st in
   if ps_kind s0 == TKLBrace then
     let s1 = ps_enter_delim (ps_adv s0) in
@@ -722,7 +759,13 @@ let parse_struct_body_stmt sname st =
     read_fs s1 []
   else
     let sx = if ps_kind s0 == TKNewline then ps_adv s0 else s0 in
-    let (_, s1) = ps_expect TKIndent "expected indented struct fields" sx in
+    let (ind_tok, s1) = ps_expect TKIndent "expected indented struct fields" sx in
+    let ind_col = match ind_tok with | BTok _ _ _ _ _ c -> c in
+    let _ =
+      if kw_col > 0 && ind_col <= kw_col then
+        panic "bootstrap parse error: struct fields must be indented relative to 'struct' keyword"
+      else ()
+    in
     let rec read_fs s acc =
       let sk = ps_skip_seps s in
       if ps_kind sk == TKDedent || ps_kind sk == TKEof then
@@ -743,7 +786,8 @@ let parse_let_stmt st =
   if (not is_rec && (ps_kind st2 == TKLower || ps_kind st2 == TKUpper) &&
       ps_kind (ps_adv st2) == TKEq && ps_kind (ps_adv (ps_adv st2)) == TKKwStruct) then
     let sname = ps_lexeme st2 in
-    parse_struct_body_stmt sname (ps_adv (ps_adv (ps_adv st2)))
+    let s_kw = ps_adv (ps_adv st2) in
+    parse_struct_body_stmt sname (ps_col s_kw) (ps_adv s_kw)
   else
     let (pat, params, st3) =
       if ps_kind st2 == TKLower && ps_kind (ps_adv st2) != TKEq && ps_kind (ps_adv st2) != TKColon then
@@ -783,8 +827,7 @@ let parse_program_tokens toks =
       let (stmt, s2) =
         if ps_kind s1 == TKKwType then parse_type_decl s1
         else if ps_kind s1 == TKKwStruct then
-          let s_nm = ps_adv s1 in
-          parse_struct_body_stmt (ps_lexeme s_nm) (ps_adv s_nm)
+          panic "bootstrap parse error: structs must be assigned with 'let <name> = struct:'"
         else if ps_kind s1 == TKKwLet then parse_let_stmt s1
         else
           let (lhs, sn) = parse_expr_mode EMExpr s1 in

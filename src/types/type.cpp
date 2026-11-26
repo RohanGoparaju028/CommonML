@@ -125,7 +125,7 @@ static TypePtr apply_subst_skip(const Subst& s, const TypePtr& t,
                 }
                 auto it = s.find(n.id);
                 if (it != s.end()) {
-                    return apply_subst(s, it->second);
+                    return apply_subst_skip(s, it->second, skip);
                 }
                 return t;
             } else if constexpr (std::is_same_v<T, TypeCon>) {

@@ -6,7 +6,7 @@ using namespace cml;
 CML_TEST(vm_closures_and_currying) {
     Pipeline p;
     EvalResult res = p.eval_source("closures.cml", R"(
-        let make_adder x = fn y -> x + y
+        let make_adder x = func y -> x + y
         let add10 = make_adder 10
         add10 32
     )");
@@ -27,7 +27,7 @@ CML_TEST(vm_recursion_and_list_patterns) {
           | h :: t -> h + sum t
 
         [1, 2, 3, 4]
-        |> map (fn x -> x * x)
+        |> map (func x -> x * x)
         |> sum
     )");
     CML_ASSERT_EQ(value_to_string(res.value), std::string("30"));

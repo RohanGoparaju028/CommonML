@@ -21,7 +21,7 @@ const char* token_kind_name(TokenKind kind) {
         case TokenKind::KwVar: return "'var'";
         case TokenKind::KwRec: return "'rec'";
         case TokenKind::KwIn: return "'in'";
-        case TokenKind::KwFn: return "'fn'";
+        case TokenKind::KwFunc: return "'func'";
         case TokenKind::KwIf: return "'if'";
         case TokenKind::KwThen: return "'then'";
         case TokenKind::KwElse: return "'else'";
@@ -399,7 +399,7 @@ Token Lexer::scan_ident(size_t start_offset, size_t start_line, size_t start_col
         {"var", TokenKind::KwVar},
         {"rec", TokenKind::KwRec},
         {"in", TokenKind::KwIn},
-        {"fn", TokenKind::KwFn},
+        {"func", TokenKind::KwFunc},
         {"if", TokenKind::KwIf},
         {"then", TokenKind::KwThen},
         {"else", TokenKind::KwElse},

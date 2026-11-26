@@ -28,4 +28,4 @@ let arg_or idx fallback =
   if idx >= 0 && idx < list_len args then list_nth args idx else fallback
 
 let has_flag flag =
-  core.list_any (fn a -> a == flag) (cli_args ())
+  core.list_any (func a -> a == flag) (cli_args ())

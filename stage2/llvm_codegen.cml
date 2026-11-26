@@ -1,0 +1,1164 @@
+-- Stage 2 CommonML -> LLVM IR Code Generator written in CommonML
+let core = import "std/core"
+let ast = import "ast.cml"
+
+let hex_digit n =
+  let digits = "0123456789ABCDEF" in
+  str_sub digits n 1
+
+let llvm_escape_str s =
+  let n = str_len s in
+  let rec go i acc =
+    if i >= n then str_concat_list (list_rev ("\\00" :: acc))
+    else
+      let b = str_byte_at s i in
+      let part =
+        if b >= 32 && b <= 126 && b != 34 && b != 92 then char_from_code b
+        else "\\" ++ hex_digit (b / 16) ++ hex_digit (b % 16)
+      in
+      go (i + 1) (part :: acc)
+  in
+  (go 0 [], n + 1)
+
+let llvm_float_lit f =
+  let s = to_string f in
+  let n = str_len s in
+  let rec has_dot_or_e i =
+    if i >= n then false
+    else
+      let b = str_byte_at s i in
+      if b == 46 || b == 101 || b == 69 then true
+      else has_dot_or_e (i + 1)
+  in
+  if has_dot_or_e 0 then s else s ++ ".0"
+
+let builtin_names =
+  [
+    "print", "println", "to_string", "not", "abs", "int_of_float", "float_of_int",
+    "int_of_string", "float_of_string", "str_len", "str_sub", "str_byte_at",
+    "char_from_code", "str_concat_list", "list_len", "is_empty", "head", "tail",
+    "list_nth", "list_rev", "list_append", "list_snoc", "panic", "read_file",
+    "write_file", "file_exists", "cli_args", "sys_exec", "heap_live_count",
+    "ptr_is_alive", "sqrt", "sin", "cos", "floor", "ceil"
+  ]
+
+let is_builtin nm = core.list_any (func b -> b == nm) builtin_names
+
+let rec assoc_find k xs =
+  match xs with
+  | [] -> None
+  | (x, v) :: rest -> if x == k then Some v else assoc_find k rest
+
+let rec pat_vars pat acc =
+  match pat with
+  | PVar nm -> nm :: acc
+  | PTuple ps -> core.list_foldl (func a p -> pat_vars p a) acc ps
+  | PList ps -> core.list_foldl (func a p -> pat_vars p a) acc ps
+  | PCons h t -> pat_vars t (pat_vars h acc)
+  | PCtor _ ps -> core.list_foldl (func a p -> pat_vars p a) acc ps
+  | _ -> acc
+
+let add_unique x xs =
+  if core.list_any (func y -> y == x) xs then xs else x :: xs
+
+let rec collect_free_vars e bound encl ctors globals acc =
+  match e with
+  | EVar nm ->
+      if core.list_any (func b -> b == nm) bound then acc
+      else if core.list_any (func l -> l == nm) encl then add_unique nm acc
+      else if core.list_any (func g -> match g with | (gn, _) -> gn == nm) globals then acc
+      else if is_builtin nm then acc
+      else if core.list_any (func c -> match c with | (cn, _, _, _) -> cn == nm) ctors then acc
+      else add_unique nm acc
+  | ETuple es -> core.list_foldl (func a x -> collect_free_vars x bound encl ctors globals a) acc es
+  | EList es -> core.list_foldl (func a x -> collect_free_vars x bound encl ctors globals a) acc es
+  | EUnary _ x -> collect_free_vars x bound encl ctors globals acc
+  | EBin _ l r -> collect_free_vars r bound encl ctors globals (collect_free_vars l bound encl ctors globals acc)
+  | EIf c t f ->
+      let a1 = collect_free_vars c bound encl ctors globals acc in
+      let a2 = collect_free_vars t bound encl ctors globals a1 in
+      collect_free_vars f bound encl ctors globals a2
+  | EWhile c b ->
+      collect_free_vars b bound encl ctors globals (collect_free_vars c bound encl ctors globals acc)
+  | EForEach p col b ->
+      let a1 = collect_free_vars col bound encl ctors globals acc in
+      let b1 = list_append (pat_vars p []) bound in
+      collect_free_vars b b1 encl ctors globals a1
+  | ELet is_rec p v b ->
+      let pv = pat_vars p [] in
+      let b_after = list_append pv bound in
+      let a1 = collect_free_vars v (if is_rec then b_after else bound) encl ctors globals acc in
+      collect_free_vars b b_after encl ctors globals a1
+  | EVarBind p v b ->
+      let a1 = collect_free_vars v bound encl ctors globals acc in
+      collect_free_vars b (list_append (pat_vars p []) bound) encl ctors globals a1
+  | EAssign nm rhs ->
+      let a1 = collect_free_vars (EVar nm) bound encl ctors globals acc in
+      collect_free_vars rhs bound encl ctors globals a1
+  | EFn p _ b ->
+      collect_free_vars b (list_append (pat_vars p []) bound) encl ctors globals acc
+  | EApp f a ->
+      collect_free_vars a bound encl ctors globals (collect_free_vars f bound encl ctors globals acc)
+  | EMatch sc arms ->
+      let a1 = collect_free_vars sc bound encl ctors globals acc in
+      core.list_foldl (func a arm ->
+        match arm with
+        | (p, b) -> collect_free_vars b (list_append (pat_vars p []) bound) encl ctors globals a
+      ) a1 arms
+  | EAnnot x _ -> collect_free_vars x bound encl ctors globals acc
+  | EStructLit _ fs ->
+      core.list_foldl (func a kv -> match kv with | (_, fv) -> collect_free_vars fv bound encl ctors globals a) acc fs
+  | EFieldGet obj _ -> collect_free_vars obj bound encl ctors globals acc
+  | EFieldSet obj _ rhs -> collect_free_vars rhs bound encl ctors globals (collect_free_vars obj bound encl ctors globals acc)
+  | ENew x -> collect_free_vars x bound encl ctors globals acc
+  | EClose x -> collect_free_vars x bound encl ctors globals acc
+  | EScopeDefer act b -> collect_free_vars b bound encl ctors globals (collect_free_vars act bound encl ctors globals acc)
+  | EDerefSet p v -> collect_free_vars v bound encl ctors globals (collect_free_vars p bound encl ctors globals acc)
+  | EPtrFieldGet p _ -> collect_free_vars p bound encl ctors globals acc
+  | EPtrFieldSet p _ rhs -> collect_free_vars rhs bound encl ctors globals (collect_free_vars p bound encl ctors globals acc)
+  | _ -> acc
+
+let rec flatten_fn_expr e acc_params =
+  match e with
+  | EFn p _ body -> flatten_fn_expr body (p :: acc_params)
+  | _ -> (list_rev acc_params, e)
+
+let rec unwrap_app_chain e acc_args =
+  match e with
+  | EApp f a -> unwrap_app_chain f (a :: acc_args)
+  | _ -> (e, acc_args)
+
+-- Codegen State:
+-- CGSt next_id str_lits fn_defs ctors globals_map
+-- str_lits: List (gname, escaped, byte_len)
+-- ctors: List (cname, (tag, arity, gname))
+-- globals_map: List (cml_name, llvm_gname)
+type CGGlobal = CGG Int (List (String * String * Int)) (List String) (List (String * Int * Int * String)) (List (String * String))
+
+-- Function-local Codegen Builder:
+-- FBuild allocas instrs terminated self_info loop_stack locals_map
+-- locals_map: List (cml_name, llvm_alloca_reg)
+-- self_info: Option (String * Int * String * List String)  -- (self_name, arity, loop_lbl, param_allocas)
+type SelfInfo = NoSelf | SelfLoop String Int String (List String)
+type FBuild = FB (List String) (List String) Bool SelfInfo (List (String * String)) (List (String * String))
+
+let cg_fresh_id cg =
+  match cg with
+  | CGG nid strs fns ctors glbs -> (nid, CGG (nid + 1) strs fns ctors glbs)
+
+let cg_fresh_reg cg =
+  let (id, cg1) = cg_fresh_id cg in
+  ("%r" ++ to_string id, cg1)
+
+let cg_fresh_lbl prefix cg =
+  let (id, cg1) = cg_fresh_id cg in
+  (prefix ++ "_" ++ to_string id, cg1)
+
+let cg_add_str s cg =
+  let (esc, blen) = llvm_escape_str s in
+  match cg with
+  | CGG nid strs fns ctors glbs ->
+      let existing =
+        core.list_find (func item ->
+          match item with
+          | (_, e1, l1) -> e1 == esc && l1 == blen
+        ) strs
+      in
+      match existing with
+      | Some (gn, _, _) -> (gn, blen - 1, cg)
+      | None ->
+          let gn = "@.str." ++ to_string nid in
+          (gn, blen - 1, CGG (nid + 1) ((gn, esc, blen) :: strs) fns ctors glbs)
+
+let cg_add_fn_def def_str cg =
+  match cg with
+  | CGG nid strs fns ctors glbs -> CGG nid strs (def_str :: fns) ctors glbs
+
+let cg_ctors cg = match cg with | CGG _ _ _ c _ -> c
+let cg_globals cg = match cg with | CGG _ _ _ _ g -> g
+
+let fb_emit line fb =
+  match fb with
+  | FB al ins term si ls lm ->
+      if term then fb else FB al (("  " ++ line) :: ins) false si ls lm
+
+let fb_emit_lbl lbl fb =
+  match fb with
+  | FB al ins _ si ls lm -> FB al ((lbl ++ ":") :: ins) false si ls lm
+
+let fb_emit_term line fb =
+  match fb with
+  | FB al ins term si ls lm ->
+      if term then fb else FB al (("  " ++ line) :: ins) true si ls lm
+
+let fb_add_alloca reg ty fb =
+  match fb with
+  | FB al ins term si ls lm -> FB (("  " ++ reg ++ " = alloca " ++ ty) :: al) ins term si ls lm
+
+let fb_set_terminated flag fb =
+  match fb with
+  | FB al ins _ si ls lm -> FB al ins flag si ls lm
+
+let fb_is_term fb = match fb with | FB _ _ t _ _ _ -> t
+
+let fb_bind_local nm reg fb =
+  match fb with
+  | FB al ins term si ls lm -> FB al ins term si ls ((nm, reg) :: lm)
+
+let fb_locals fb = match fb with | FB _ _ _ _ _ lm -> lm
+let fb_with_locals lm fb = match fb with | FB al ins term si ls _ -> FB al ins term si ls lm
+let fb_self fb = match fb with | FB _ _ _ si _ _ -> si
+let fb_push_loop cont_l brk_l fb =
+  match fb with
+  | FB al ins term si ls lm -> FB al ins term si ((cont_l, brk_l) :: ls) lm
+let fb_pop_loop fb =
+  match fb with
+  | FB al ins term si ls lm -> FB al ins term si (tail ls) lm
+let fb_cur_loop fb =
+  match fb with
+  | FB _ _ _ _ ls _ -> if is_empty ls then None else Some (head ls)
+
+let fb_alloc_slot prefix cg fb =
+  let (reg, cg1) = cg_fresh_reg cg in
+  let fb1 = fb_add_alloca reg "ptr" fb in
+  (reg, cg1, fb1)
+
+let rec find_ctor cname ctors =
+  match ctors with
+  | [] -> None
+  | (nm, tag, ar, gn) :: rest -> if nm == cname then Some (tag, ar, gn) else find_ctor cname rest
+
+let rec compile_pat_bind val_reg pat fail_lbl is_global cg fb =
+  match pat with
+  | PWild -> (cg, fb)
+  | PVar nm ->
+      if is_global then
+        match assoc_find nm (cg_globals cg) with
+        | Some gn ->
+            let fb1 = fb_emit ("store ptr " ++ val_reg ++ ", ptr " ++ gn) fb in
+            (cg, fb1)
+        | None -> panic ("stage2 codegen error: missing global '" ++ nm ++ "'")
+      else
+        let (slot, cg1, fb1) = fb_alloc_slot "v" cg fb in
+        let fb2 = fb_emit ("store ptr " ++ val_reg ++ ", ptr " ++ slot) fb1 in
+        (cg1, fb_bind_local nm slot fb2)
+  | PInt x ->
+      let (ok, cg1) = cg_fresh_reg cg in
+      let (cmp, cg2) = cg_fresh_reg cg1 in
+      let (nxt, cg3) = cg_fresh_lbl "pat_ok" cg2 in
+      let fb1 = fb_emit (ok ++ " = call i64 @cml_match_int(ptr " ++ val_reg ++ ", i64 " ++ to_string x ++ ")") fb in
+      let fb2 = fb_emit (cmp ++ " = icmp ne i64 " ++ ok ++ ", 0") fb1 in
+      let fb3 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ nxt ++ ", label %" ++ fail_lbl) fb2 in
+      (cg3, fb_emit_lbl nxt fb3)
+  | PFloat x ->
+      let (ok, cg1) = cg_fresh_reg cg in
+      let (cmp, cg2) = cg_fresh_reg cg1 in
+      let (nxt, cg3) = cg_fresh_lbl "pat_ok" cg2 in
+      let fb1 = fb_emit (ok ++ " = call i64 @cml_match_float(ptr " ++ val_reg ++ ", double " ++ llvm_float_lit x ++ ")") fb in
+      let fb2 = fb_emit (cmp ++ " = icmp ne i64 " ++ ok ++ ", 0") fb1 in
+      let fb3 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ nxt ++ ", label %" ++ fail_lbl) fb2 in
+      (cg3, fb_emit_lbl nxt fb3)
+  | PBool b ->
+      let (ok, cg1) = cg_fresh_reg cg in
+      let (cmp, cg2) = cg_fresh_reg cg1 in
+      let (nxt, cg3) = cg_fresh_lbl "pat_ok" cg2 in
+      let bv = if b then "1" else "0" in
+      let fb1 = fb_emit (ok ++ " = call i64 @cml_match_bool(ptr " ++ val_reg ++ ", i64 " ++ bv ++ ")") fb in
+      let fb2 = fb_emit (cmp ++ " = icmp ne i64 " ++ ok ++ ", 0") fb1 in
+      let fb3 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ nxt ++ ", label %" ++ fail_lbl) fb2 in
+      (cg3, fb_emit_lbl nxt fb3)
+  | PString s ->
+      let (gn, slen, cg1) = cg_add_str s cg in
+      let (ok, cg2) = cg_fresh_reg cg1 in
+      let (cmp, cg3) = cg_fresh_reg cg2 in
+      let (nxt, cg4) = cg_fresh_lbl "pat_ok" cg3 in
+      let fb1 = fb_emit (ok ++ " = call i64 @cml_match_str(ptr " ++ val_reg ++ ", ptr " ++ gn ++ ", i64 " ++ to_string slen ++ ")") fb in
+      let fb2 = fb_emit (cmp ++ " = icmp ne i64 " ++ ok ++ ", 0") fb1 in
+      let fb3 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ nxt ++ ", label %" ++ fail_lbl) fb2 in
+      (cg4, fb_emit_lbl nxt fb3)
+  | PUnit ->
+      let (ok, cg1) = cg_fresh_reg cg in
+      let (cmp, cg2) = cg_fresh_reg cg1 in
+      let (nxt, cg3) = cg_fresh_lbl "pat_ok" cg2 in
+      let fb1 = fb_emit (ok ++ " = call i64 @cml_match_unit(ptr " ++ val_reg ++ ")") fb in
+      let fb2 = fb_emit (cmp ++ " = icmp ne i64 " ++ ok ++ ", 0") fb1 in
+      let fb3 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ nxt ++ ", label %" ++ fail_lbl) fb2 in
+      (cg3, fb_emit_lbl nxt fb3)
+  | PTuple elems ->
+      let (ok, cg1) = cg_fresh_reg cg in
+      let (cmp, cg2) = cg_fresh_reg cg1 in
+      let (nxt, cg3) = cg_fresh_lbl "pat_ok" cg2 in
+      let fb1 = fb_emit (ok ++ " = call i64 @cml_match_tuple(ptr " ++ val_reg ++ ", i64 " ++ to_string (list_len elems) ++ ")") fb in
+      let fb2 = fb_emit (cmp ++ " = icmp ne i64 " ++ ok ++ ", 0") fb1 in
+      let fb3 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ nxt ++ ", label %" ++ fail_lbl) fb2 in
+      let fb4 = fb_emit_lbl nxt fb3 in
+      let rec go i c f =
+        if i >= list_len elems then (c, f)
+        else
+          let (el_reg, c1) = cg_fresh_reg c in
+          let f1 = fb_emit (el_reg ++ " = call ptr @cml_tuple_get(ptr " ++ val_reg ++ ", i64 " ++ to_string i ++ ")") f in
+          let (c2, f2) = compile_pat_bind el_reg (list_nth elems i) fail_lbl is_global c1 f1 in
+          go (i + 1) c2 f2
+      in
+      go 0 cg3 fb4
+  | PList elems ->
+      let (ok, cg1) = cg_fresh_reg cg in
+      let (cmp, cg2) = cg_fresh_reg cg1 in
+      let (nxt, cg3) = cg_fresh_lbl "pat_ok" cg2 in
+      let fb1 = fb_emit (ok ++ " = call i64 @cml_match_list_len(ptr " ++ val_reg ++ ", i64 " ++ to_string (list_len elems) ++ ")") fb in
+      let fb2 = fb_emit (cmp ++ " = icmp ne i64 " ++ ok ++ ", 0") fb1 in
+      let fb3 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ nxt ++ ", label %" ++ fail_lbl) fb2 in
+      let fb4 = fb_emit_lbl nxt fb3 in
+      let rec go i c f =
+        if i >= list_len elems then (c, f)
+        else
+          let (el_reg, c1) = cg_fresh_reg c in
+          let f1 = fb_emit (el_reg ++ " = call ptr @cml_list_get(ptr " ++ val_reg ++ ", i64 " ++ to_string i ++ ")") f in
+          let (c2, f2) = compile_pat_bind el_reg (list_nth elems i) fail_lbl is_global c1 f1 in
+          go (i + 1) c2 f2
+      in
+      go 0 cg3 fb4
+  | PCons hd tl ->
+      let (ok, cg1) = cg_fresh_reg cg in
+      let (cmp, cg2) = cg_fresh_reg cg1 in
+      let (nxt, cg3) = cg_fresh_lbl "pat_ok" cg2 in
+      let fb1 = fb_emit (ok ++ " = call i64 @cml_match_cons(ptr " ++ val_reg ++ ")") fb in
+      let fb2 = fb_emit (cmp ++ " = icmp ne i64 " ++ ok ++ ", 0") fb1 in
+      let fb3 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ nxt ++ ", label %" ++ fail_lbl) fb2 in
+      let fb4 = fb_emit_lbl nxt fb3 in
+      let (hd_reg, cg4) = cg_fresh_reg cg3 in
+      let fb5 = fb_emit (hd_reg ++ " = call ptr @cml_list_get(ptr " ++ val_reg ++ ", i64 0)") fb4 in
+      let (cg5, fb6) = compile_pat_bind hd_reg hd fail_lbl is_global cg4 fb5 in
+      let (tl_reg, cg6) = cg_fresh_reg cg5 in
+      let fb7 = fb_emit (tl_reg ++ " = call ptr @cml_list_tail(ptr " ++ val_reg ++ ", i64 1)") fb6 in
+      compile_pat_bind tl_reg tl fail_lbl is_global cg6 fb7
+  | PCtor cname args ->
+      match find_ctor cname (cg_ctors cg) with
+      | None -> panic ("stage2 codegen error: unknown constructor '" ++ cname ++ "'")
+      | Some (tag, _, _) ->
+          let (ok, cg1) = cg_fresh_reg cg in
+          let (cmp, cg2) = cg_fresh_reg cg1 in
+          let (nxt, cg3) = cg_fresh_lbl "pat_ok" cg2 in
+          let fb1 = fb_emit (ok ++ " = call i64 @cml_match_adt(ptr " ++ val_reg ++ ", i64 " ++ to_string tag ++ ")") fb in
+          let fb2 = fb_emit (cmp ++ " = icmp ne i64 " ++ ok ++ ", 0") fb1 in
+          let fb3 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ nxt ++ ", label %" ++ fail_lbl) fb2 in
+          let fb4 = fb_emit_lbl nxt fb3 in
+          let rec go i c f =
+            if i >= list_len args then (c, f)
+            else
+              let (fd_reg, c1) = cg_fresh_reg c in
+              let f1 = fb_emit (fd_reg ++ " = call ptr @cml_adt_field(ptr " ++ val_reg ++ ", i64 " ++ to_string i ++ ")") f in
+              let (c2, f2) = compile_pat_bind fd_reg (list_nth args i) fail_lbl is_global c1 f1 in
+              go (i + 1) c2 f2
+          in
+          go 0 cg3 fb4
+
+let emit_pat_match_checked val_reg pat is_global cg fb =
+  let (fail_lbl, cg1) = cg_fresh_lbl "mfail" cg in
+  let (done_lbl, cg2) = cg_fresh_lbl "mok" cg1 in
+  let (cg3, fb1) = compile_pat_bind val_reg pat fail_lbl is_global cg2 fb in
+  let fb2 = fb_emit_term ("br label %" ++ done_lbl) fb1 in
+  let fb3 = fb_emit_lbl fail_lbl fb2 in
+  let fb4 = fb_emit "call void @cml_match_fail()" fb3 in
+  let fb5 = fb_emit_term "unreachable" fb4 in
+  (cg3, fb_emit_lbl done_lbl fb5)
+
+type CGMode = CGExpr BExpr Bool | CGFn BExpr (Option String)
+
+let rec compile_cg mode cg fb =
+  let compile_expr e tp c f = compile_cg (CGExpr e tp) c f in
+  let compile_fn_value e sopt c f = compile_cg (CGFn e sopt) c f in
+  match mode with
+  | CGExpr expr tail_pos ->
+      (match expr with
+  | EUnit ->
+      let (r, cg1) = cg_fresh_reg cg in
+      (r, cg1, fb_emit (r ++ " = call ptr @cml_unit()") fb)
+  | EInt x ->
+      let (r, cg1) = cg_fresh_reg cg in
+      (r, cg1, fb_emit (r ++ " = call ptr @cml_int(i64 " ++ to_string x ++ ")") fb)
+  | EFloat f ->
+      let (r, cg1) = cg_fresh_reg cg in
+      (r, cg1, fb_emit (r ++ " = call ptr @cml_float(double " ++ llvm_float_lit f ++ ")") fb)
+  | EBool b ->
+      let (r, cg1) = cg_fresh_reg cg in
+      (r, cg1, fb_emit (r ++ " = call ptr @cml_bool(i64 " ++ (if b then "1" else "0") ++ ")") fb)
+  | EString s ->
+      let (gn, slen, cg1) = cg_add_str s cg in
+      let (r, cg2) = cg_fresh_reg cg1 in
+      (r, cg2, fb_emit (r ++ " = call ptr @cml_str(ptr " ++ gn ++ ", i64 " ++ to_string slen ++ ")") fb)
+  | EAnnot e _ -> compile_expr e tail_pos cg fb
+  | EVar nm ->
+      (match assoc_find nm (fb_locals fb) with
+      | Some slot ->
+          let (r, cg1) = cg_fresh_reg cg in
+          (r, cg1, fb_emit (r ++ " = load ptr, ptr " ++ slot) fb)
+      | None ->
+          match assoc_find nm (cg_globals cg) with
+          | Some gn ->
+              let (r, cg1) = cg_fresh_reg cg in
+              (r, cg1, fb_emit (r ++ " = load ptr, ptr " ++ gn) fb)
+          | None ->
+              if is_builtin nm then
+                let (sgn, _, cg1) = cg_add_str nm cg in
+                let (r, cg2) = cg_fresh_reg cg1 in
+                (r, cg2, fb_emit (r ++ " = call ptr @cml_builtin_closure(ptr " ++ sgn ++ ")") fb)
+              else panic ("stage2 codegen error: unbound variable '" ++ nm ++ "'"))
+  | ECtor cname ->
+      (match find_ctor cname (cg_ctors cg) with
+      | None -> panic ("stage2 codegen error: unknown constructor '" ++ cname ++ "'")
+      | Some (_, _, gn) ->
+          let (r, cg1) = cg_fresh_reg cg in
+          (r, cg1, fb_emit (r ++ " = load ptr, ptr " ++ gn) fb))
+  | EUnary op e ->
+      (match op with
+      | UAddrOf ->
+          (match e with
+          | EVar nm ->
+              (match assoc_find nm (fb_locals fb) with
+              | Some slot ->
+                  let (r, cg1) = cg_fresh_reg cg in
+                  (r, cg1, fb_emit (r ++ " = call ptr @cml_addr_of_cell(ptr " ++ slot ++ ")") fb)
+              | None ->
+                  match assoc_find nm (cg_globals cg) with
+                  | Some gn ->
+                      let (r, cg1) = cg_fresh_reg cg in
+                      (r, cg1, fb_emit (r ++ " = call ptr @cml_addr_of_cell(ptr " ++ gn ++ ")") fb)
+                  | None -> panic ("stage2 codegen error: cannot take address of '" ++ nm ++ "'"))
+          | _ -> panic "stage2 codegen error: '&' requires a variable")
+      | _ ->
+          let (v, cg1, fb1) = compile_expr e false cg fb in
+          let fn_nm =
+            match op with
+            | UNegInt -> "cml_neg"
+            | UNegFloat -> "cml_fneg"
+            | UBitNot -> "cml_bitnot"
+            | ULogicalNot -> "cml_not"
+            | UDeref -> "cml_deref"
+            | UAddrOf -> "cml_deref"
+          in
+          let (r, cg2) = cg_fresh_reg cg1 in
+          (r, cg2, fb_emit (r ++ " = call ptr @" ++ fn_nm ++ "(ptr " ++ v ++ ")") fb1))
+  | EBin op l r ->
+      (match op with
+      | BSeq ->
+          let (_, cg1, fb1) = compile_expr l false cg fb in
+          compile_expr r tail_pos cg1 fb1
+      | BPipe -> compile_expr (EApp r l) tail_pos cg fb
+      | BAnd ->
+          let (slot, cg1, fb1) = fb_alloc_slot "and" cg fb in
+          let (lv, cg2, fb2) = compile_expr l false cg1 fb1 in
+          let (breg, cg3) = cg_fresh_reg cg2 in
+          let (cmp, cg4) = cg_fresh_reg cg3 in
+          let (rhs_l, cg5) = cg_fresh_lbl "and_rhs" cg4 in
+          let (false_l, cg6) = cg_fresh_lbl "and_false" cg5 in
+          let (end_l, cg7) = cg_fresh_lbl "and_end" cg6 in
+          let fb3 = fb_emit (breg ++ " = call i64 @cml_is_true(ptr " ++ lv ++ ")") fb2 in
+          let fb4 = fb_emit (cmp ++ " = icmp ne i64 " ++ breg ++ ", 0") fb3 in
+          let fb5 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ rhs_l ++ ", label %" ++ false_l) fb4 in
+          let fb6 = fb_emit_lbl rhs_l fb5 in
+          let (rv, cg8, fb7) = compile_expr r false cg7 fb6 in
+          let fb8 = fb_emit ("store ptr " ++ rv ++ ", ptr " ++ slot) fb7 in
+          let fb9 = fb_emit_term ("br label %" ++ end_l) fb8 in
+          let fb10 = fb_emit_lbl false_l fb9 in
+          let (fval, cg9) = cg_fresh_reg cg8 in
+          let fb11 = fb_emit (fval ++ " = call ptr @cml_bool(i64 0)") fb10 in
+          let fb12 = fb_emit ("store ptr " ++ fval ++ ", ptr " ++ slot) fb11 in
+          let fb13 = fb_emit_term ("br label %" ++ end_l) fb12 in
+          let fb14 = fb_emit_lbl end_l fb13 in
+          let (res, cg10) = cg_fresh_reg cg9 in
+          (res, cg10, fb_emit (res ++ " = load ptr, ptr " ++ slot) fb14)
+      | BOr ->
+          let (slot, cg1, fb1) = fb_alloc_slot "or" cg fb in
+          let (lv, cg2, fb2) = compile_expr l false cg1 fb1 in
+          let (breg, cg3) = cg_fresh_reg cg2 in
+          let (cmp, cg4) = cg_fresh_reg cg3 in
+          let (true_l, cg5) = cg_fresh_lbl "or_true" cg4 in
+          let (rhs_l, cg6) = cg_fresh_lbl "or_rhs" cg5 in
+          let (end_l, cg7) = cg_fresh_lbl "or_end" cg6 in
+          let fb3 = fb_emit (breg ++ " = call i64 @cml_is_true(ptr " ++ lv ++ ")") fb2 in
+          let fb4 = fb_emit (cmp ++ " = icmp ne i64 " ++ breg ++ ", 0") fb3 in
+          let fb5 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ true_l ++ ", label %" ++ rhs_l) fb4 in
+          let fb6 = fb_emit_lbl true_l fb5 in
+          let (tval, cg8) = cg_fresh_reg cg7 in
+          let fb7 = fb_emit (tval ++ " = call ptr @cml_bool(i64 1)") fb6 in
+          let fb8 = fb_emit ("store ptr " ++ tval ++ ", ptr " ++ slot) fb7 in
+          let fb9 = fb_emit_term ("br label %" ++ end_l) fb8 in
+          let fb10 = fb_emit_lbl rhs_l fb9 in
+          let (rv, cg9, fb11) = compile_expr r false cg8 fb10 in
+          let fb12 = fb_emit ("store ptr " ++ rv ++ ", ptr " ++ slot) fb11 in
+          let fb13 = fb_emit_term ("br label %" ++ end_l) fb12 in
+          let fb14 = fb_emit_lbl end_l fb13 in
+          let (res, cg10) = cg_fresh_reg cg9 in
+          (res, cg10, fb_emit (res ++ " = load ptr, ptr " ++ slot) fb14)
+      | _ ->
+          let (lv, cg1, fb1) = compile_expr l false cg fb in
+          let (rv, cg2, fb2) = compile_expr r false cg1 fb1 in
+          let fn_nm =
+            match op with
+            | BAddInt -> "cml_add"
+            | BSubInt -> "cml_sub"
+            | BMulInt -> "cml_mul"
+            | BDivInt -> "cml_div"
+            | BModInt -> "cml_mod"
+            | BAddFloat -> "cml_fadd"
+            | BSubFloat -> "cml_fsub"
+            | BMulFloat -> "cml_fmul"
+            | BDivFloat -> "cml_fdiv"
+            | BBitAnd -> "cml_bitand"
+            | BBitOr -> "cml_bitor"
+            | BBitXor -> "cml_bitxor"
+            | BShl -> "cml_shl"
+            | BShr -> "cml_shr"
+            | BConcat -> "cml_concat"
+            | BCons -> "cml_cons"
+            | BEq -> "cml_eq"
+            | BNeq -> "cml_neq"
+            | BLt -> "cml_lt"
+            | BLe -> "cml_le"
+            | BGt -> "cml_gt"
+            | BGe -> "cml_ge"
+            | _ -> "cml_add"
+          in
+          let (res, cg3) = cg_fresh_reg cg2 in
+          (res, cg3, fb_emit (res ++ " = call ptr @" ++ fn_nm ++ "(ptr " ++ lv ++ ", ptr " ++ rv ++ ")") fb2))
+  | ETuple elems ->
+      let n = list_len elems in
+      if n == 0 then
+        let (r, cg1) = cg_fresh_reg cg in
+        (r, cg1, fb_emit (r ++ " = call ptr @cml_tuple_make(i64 0, ptr null)") fb)
+      else
+        let (arr, cg1) = cg_fresh_reg cg in
+        let fb1 = fb_add_alloca arr ("[" ++ to_string n ++ " x ptr]") fb in
+        let rec go i c f =
+          if i >= n then (c, f)
+          else
+            let (ev, c1, f1) = compile_expr (list_nth elems i) false c f in
+            let (ep, c2) = cg_fresh_reg c1 in
+            let f2 = fb_emit (ep ++ " = getelementptr [" ++ to_string n ++ " x ptr], ptr " ++ arr ++ ", i64 0, i64 " ++ to_string i) f1 in
+            let f3 = fb_emit ("store ptr " ++ ev ++ ", ptr " ++ ep) f2 in
+            go (i + 1) c2 f3
+        in
+        let (cg2, fb2) = go 0 cg1 fb1 in
+        let (r, cg3) = cg_fresh_reg cg2 in
+        (r, cg3, fb_emit (r ++ " = call ptr @cml_tuple_make(i64 " ++ to_string n ++ ", ptr " ++ arr ++ ")") fb2)
+  | EList elems ->
+      let n = list_len elems in
+      if n == 0 then
+        let (r, cg1) = cg_fresh_reg cg in
+        (r, cg1, fb_emit (r ++ " = call ptr @cml_nil()") fb)
+      else
+        let (arr, cg1) = cg_fresh_reg cg in
+        let fb1 = fb_add_alloca arr ("[" ++ to_string n ++ " x ptr]") fb in
+        let rec go i c f =
+          if i >= n then (c, f)
+          else
+            let (ev, c1, f1) = compile_expr (list_nth elems i) false c f in
+            let (ep, c2) = cg_fresh_reg c1 in
+            let f2 = fb_emit (ep ++ " = getelementptr [" ++ to_string n ++ " x ptr], ptr " ++ arr ++ ", i64 0, i64 " ++ to_string i) f1 in
+            let f3 = fb_emit ("store ptr " ++ ev ++ ", ptr " ++ ep) f2 in
+            go (i + 1) c2 f3
+        in
+        let (cg2, fb2) = go 0 cg1 fb1 in
+        let (r, cg3) = cg_fresh_reg cg2 in
+        (r, cg3, fb_emit (r ++ " = call ptr @cml_list_make(i64 " ++ to_string n ++ ", ptr " ++ arr ++ ")") fb2)
+  | EIf c t e ->
+      let (slot, cg1, fb1) = fb_alloc_slot "if" cg fb in
+      let (cv, cg2, fb2) = compile_expr c false cg1 fb1 in
+      let (breg, cg3) = cg_fresh_reg cg2 in
+      let (cmp, cg4) = cg_fresh_reg cg3 in
+      let (then_l, cg5) = cg_fresh_lbl "then" cg4 in
+      let (else_l, cg6) = cg_fresh_lbl "else" cg5 in
+      let (end_l, cg7) = cg_fresh_lbl "ifend" cg6 in
+      let fb3 = fb_emit (breg ++ " = call i64 @cml_is_true(ptr " ++ cv ++ ")") fb2 in
+      let fb4 = fb_emit (cmp ++ " = icmp ne i64 " ++ breg ++ ", 0") fb3 in
+      let fb5 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ then_l ++ ", label %" ++ else_l) fb4 in
+      let fb6 = fb_emit_lbl then_l fb5 in
+      let (tv, cg8, fb7) = compile_expr t tail_pos cg7 fb6 in
+      let t_term = fb_is_term fb7 in
+      let fb8 = if t_term then fb7 else fb_emit_term ("br label %" ++ end_l) (fb_emit ("store ptr " ++ tv ++ ", ptr " ++ slot) fb7) in
+      let fb9 = fb_emit_lbl else_l fb8 in
+      let (ev, cg9, fb10) = compile_expr e tail_pos cg8 fb9 in
+      let e_term = fb_is_term fb10 in
+      let fb11 = if e_term then fb10 else fb_emit_term ("br label %" ++ end_l) (fb_emit ("store ptr " ++ ev ++ ", ptr " ++ slot) fb10) in
+      if t_term && e_term then
+        ("null", cg9, fb_set_terminated true fb11)
+      else
+        let fb12 = fb_emit_lbl end_l fb11 in
+        let (res, cg10) = cg_fresh_reg cg9 in
+        (res, cg10, fb_emit (res ++ " = load ptr, ptr " ++ slot) fb12)
+  | EWhile c b ->
+      let (cond_l, cg1) = cg_fresh_lbl "wcond" cg in
+      let (body_l, cg2) = cg_fresh_lbl "wbody" cg1 in
+      let (end_l, cg3) = cg_fresh_lbl "wend" cg2 in
+      let fb1 = fb_emit_term ("br label %" ++ cond_l) fb in
+      let fb2 = fb_emit_lbl cond_l fb1 in
+      let (cv, cg4, fb3) = compile_expr c false cg3 fb2 in
+      let (breg, cg5) = cg_fresh_reg cg4 in
+      let (cmp, cg6) = cg_fresh_reg cg5 in
+      let fb4 = fb_emit (breg ++ " = call i64 @cml_is_true(ptr " ++ cv ++ ")") fb3 in
+      let fb5 = fb_emit (cmp ++ " = icmp ne i64 " ++ breg ++ ", 0") fb4 in
+      let fb6 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ body_l ++ ", label %" ++ end_l) fb5 in
+      let fb7 = fb_push_loop cond_l end_l (fb_emit_lbl body_l fb6) in
+      let (_, cg7, fb8) = compile_expr b false cg6 fb7 in
+      let fb9 = fb_emit_term ("br label %" ++ cond_l) fb8 in
+      let fb10 = fb_pop_loop (fb_emit_lbl end_l fb9) in
+      let (u, cg8) = cg_fresh_reg cg7 in
+      (u, cg8, fb_emit (u ++ " = call ptr @cml_unit()") fb10)
+  | EForEach pat col b ->
+      let (cur_slot, cg1, fb1) = fb_alloc_slot "fe" cg fb in
+      let (col_v, cg2, fb2) = compile_expr col false cg1 fb1 in
+      let fb3 = fb_emit ("store ptr " ++ col_v ++ ", ptr " ++ cur_slot) fb2 in
+      let (cond_l, cg3) = cg_fresh_lbl "fecond" cg2 in
+      let (body_l, cg4) = cg_fresh_lbl "febody" cg3 in
+      let (step_l, cg5) = cg_fresh_lbl "festep" cg4 in
+      let (end_l, cg6) = cg_fresh_lbl "feend" cg5 in
+      let fb4 = fb_emit_term ("br label %" ++ cond_l) fb3 in
+      let fb5 = fb_emit_lbl cond_l fb4 in
+      let (cur_v, cg7) = cg_fresh_reg cg6 in
+      let (has_c, cg8) = cg_fresh_reg cg7 in
+      let (cmp, cg9) = cg_fresh_reg cg8 in
+      let fb6 = fb_emit (cur_v ++ " = load ptr, ptr " ++ cur_slot) fb5 in
+      let fb7 = fb_emit (has_c ++ " = call i64 @cml_match_cons(ptr " ++ cur_v ++ ")") fb6 in
+      let fb8 = fb_emit (cmp ++ " = icmp ne i64 " ++ has_c ++ ", 0") fb7 in
+      let fb9 = fb_emit_term ("br i1 " ++ cmp ++ ", label %" ++ body_l ++ ", label %" ++ end_l) fb8 in
+      let fb10 = fb_push_loop step_l end_l (fb_emit_lbl body_l fb9) in
+      let saved_lm = fb_locals fb10 in
+      let (hd_v, cg10) = cg_fresh_reg cg9 in
+      let fb11 = fb_emit (hd_v ++ " = call ptr @cml_list_get(ptr " ++ cur_v ++ ", i64 0)") fb10 in
+      let (cg11, fb12) = emit_pat_match_checked hd_v pat false cg10 fb11 in
+      let (_, cg12, fb13) = compile_expr b false cg11 fb12 in
+      let fb14 = fb_with_locals saved_lm fb13 in
+      let fb15 = fb_emit_term ("br label %" ++ step_l) fb14 in
+      let fb16 = fb_emit_lbl step_l fb15 in
+      let (cur2, cg13) = cg_fresh_reg cg12 in
+      let (tl_v, cg14) = cg_fresh_reg cg13 in
+      let fb17 = fb_emit (cur2 ++ " = load ptr, ptr " ++ cur_slot) fb16 in
+      let fb18 = fb_emit (tl_v ++ " = call ptr @cml_list_tail(ptr " ++ cur2 ++ ", i64 1)") fb17 in
+      let fb19 = fb_emit ("store ptr " ++ tl_v ++ ", ptr " ++ cur_slot) fb18 in
+      let fb20 = fb_emit_term ("br label %" ++ cond_l) fb19 in
+      let fb21 = fb_pop_loop (fb_emit_lbl end_l fb20) in
+      let (u, cg15) = cg_fresh_reg cg14 in
+      (u, cg15, fb_emit (u ++ " = call ptr @cml_unit()") fb21)
+  | EBreak ->
+      (match fb_cur_loop fb with
+      | None -> panic "stage2 codegen error: 'break' outside loop"
+      | Some (_, brk_l) -> ("null", cg, fb_emit_term ("br label %" ++ brk_l) fb))
+  | EContinue ->
+      (match fb_cur_loop fb with
+      | None -> panic "stage2 codegen error: 'continue' outside loop"
+      | Some (cont_l, _) -> ("null", cg, fb_emit_term ("br label %" ++ cont_l) fb))
+  | ELet is_rec pat val_e body ->
+      let saved_lm = fb_locals fb in
+      if is_rec then
+        let nm = match pat with | PVar s -> s | _ -> panic "let rec requires var" in
+        let (slot, cg1, fb1) = fb_alloc_slot "rec" cg fb in
+        let fb2 = fb_bind_local nm slot fb1 in
+        let (rv, cg2, fb3) = compile_fn_value val_e (Some nm) cg1 fb2 in
+        let fb4 = fb_emit ("store ptr " ++ rv ++ ", ptr " ++ slot) fb3 in
+        let (res, cg3, fb5) = compile_expr body tail_pos cg2 fb4 in
+        (res, cg3, fb_with_locals saved_lm fb5)
+      else
+        let (rv, cg1, fb1) = compile_expr val_e false cg fb in
+        let (cg2, fb2) = emit_pat_match_checked rv pat false cg1 fb1 in
+        let (res, cg3, fb3) = compile_expr body tail_pos cg2 fb2 in
+        (res, cg3, fb_with_locals saved_lm fb3)
+  | EVarBind pat val_e body ->
+      let saved_lm = fb_locals fb in
+      let (rv, cg1, fb1) = compile_expr val_e false cg fb in
+      let (cg2, fb2) = emit_pat_match_checked rv pat false cg1 fb1 in
+      let (res, cg3, fb3) = compile_expr body tail_pos cg2 fb2 in
+      (res, cg3, fb_with_locals saved_lm fb3)
+  | EAssign nm rhs ->
+      let (rv, cg1, fb1) = compile_expr rhs false cg fb in
+      let (u, cg2) = cg_fresh_reg cg1 in
+      (match assoc_find nm (fb_locals fb1) with
+      | Some slot ->
+          let fb2 = fb_emit ("store ptr " ++ rv ++ ", ptr " ++ slot) fb1 in
+          (u, cg2, fb_emit (u ++ " = call ptr @cml_unit()") fb2)
+      | None ->
+          match assoc_find nm (cg_globals cg2) with
+          | Some gn ->
+              let fb2 = fb_emit ("store ptr " ++ rv ++ ", ptr " ++ gn) fb1 in
+              (u, cg2, fb_emit (u ++ " = call ptr @cml_unit()") fb2)
+          | None -> panic ("stage2 codegen error: unbound variable in assign '" ++ nm ++ "'"))
+  | EFn _ _ _ -> compile_fn_value expr None cg fb
+  | EApp _ _ ->
+      let (head_e, args) = unwrap_app_chain expr [] in
+      let can_self_tail =
+        if not tail_pos then false
+        else
+          match (fb_self fb, head_e) with
+          | (SelfLoop sname arity _ _, EVar vname) -> sname == vname && list_len args == arity
+          | _ -> false
+      in
+      if can_self_tail then
+        match fb_self fb with
+        | SelfLoop _ arity loop_lbl param_allocas ->
+            let rec eval_args i c f acc =
+              if i >= arity then (list_rev acc, c, f)
+              else
+                let (av, c1, f1) = compile_expr (list_nth args i) false c f in
+                eval_args (i + 1) c1 f1 (av :: acc)
+            in
+            let (arg_regs, cg1, fb1) = eval_args 0 cg fb [] in
+            let rec store_args i f =
+              if i >= arity then f
+              else
+                let f1 = fb_emit ("store ptr " ++ list_nth arg_regs i ++ ", ptr " ++ list_nth param_allocas i) f in
+                store_args (i + 1) f1
+            in
+            let fb2 = store_args 0 fb1 in
+            ("null", cg1, fb_emit_term ("br label %" ++ loop_lbl) fb2)
+        | NoSelf -> panic "unreachable"
+      else
+        let (fn_v, cg1, fb1) = compile_expr head_e false cg fb in
+        let rec apply_args i cur c f =
+          if i >= list_len args then (cur, c, f)
+          else
+            let (av, c1, f1) = compile_expr (list_nth args i) false c f in
+            let (nr, c2) = cg_fresh_reg c1 in
+            let is_last = (i + 1 == list_len args) && tail_pos in
+            let call_kw = if is_last then "tail call" else "call" in
+            let f2 = fb_emit (nr ++ " = " ++ call_kw ++ " ptr @cml_apply1(ptr " ++ cur ++ ", ptr " ++ av ++ ")") f1 in
+            apply_args (i + 1) nr c2 f2
+        in
+        apply_args 0 fn_v cg1 fb1
+  | EMatch scrut arms ->
+      let (slot, cg1, fb1) = fb_alloc_slot "m" cg fb in
+      let (sv, cg2, fb2) = compile_expr scrut false cg1 fb1 in
+      let (end_l, cg3) = cg_fresh_lbl "mend" cg2 in
+      let saved_lm = fb_locals fb2 in
+      let rec go i c f any_alive =
+        if i >= list_len arms then
+          let fb_fail = fb_emit "call void @cml_match_fail()" f in
+          let fb_unr = fb_emit_term "unreachable" fb_fail in
+          (c, fb_unr, any_alive)
+        else
+          let (p, b) = list_nth arms i in
+          let (nxt_l, c1) = cg_fresh_lbl "mnext" c in
+          let (c2, f1) = compile_pat_bind sv p nxt_l false c1 f in
+          let (bv, c3, f2) = compile_expr b tail_pos c2 f1 in
+          let b_term = fb_is_term f2 in
+          let f3 =
+            if b_term then f2
+            else fb_emit_term ("br label %" ++ end_l) (fb_emit ("store ptr " ++ bv ++ ", ptr " ++ slot) f2)
+          in
+          let f4 = fb_with_locals saved_lm (fb_emit_lbl nxt_l f3) in
+          go (i + 1) c3 f4 (any_alive || (not b_term))
+      in
+      let (cg4, fb3, any_alive) = go 0 cg3 fb2 false in
+      if not any_alive then
+        ("null", cg4, fb_set_terminated true fb3)
+      else
+        let fb4 = fb_emit_lbl end_l fb3 in
+        let (res, cg5) = cg_fresh_reg cg4 in
+        (res, cg5, fb_emit (res ++ " = load ptr, ptr " ++ slot) fb4)
+  | EStructLit sname fields ->
+      let n = list_len fields in
+      if n == 0 then
+        let (sgn, _, cg1) = cg_add_str sname cg in
+        let (r, cg2) = cg_fresh_reg cg1 in
+        (r, cg2, fb_emit (r ++ " = call ptr @cml_struct_make(ptr " ++ sgn ++ ", i64 0, ptr null, ptr null)") fb)
+      else
+        let (sgn, _, cg1) = cg_add_str sname cg in
+        let (narr, cg2) = cg_fresh_reg cg1 in
+        let (varr, cg3) = cg_fresh_reg cg2 in
+        let fb1 = fb_add_alloca narr ("[" ++ to_string n ++ " x ptr]") fb in
+        let fb2 = fb_add_alloca varr ("[" ++ to_string n ++ " x ptr]") fb1 in
+        let rec go i c f =
+          if i >= n then (c, f)
+          else
+            let (fnm, fv) = list_nth fields i in
+            let (fgn, _, c1) = cg_add_str fnm c in
+            let (fval, c2, f1) = compile_expr fv false c1 f in
+            let (np, c3) = cg_fresh_reg c2 in
+            let (vp, c4) = cg_fresh_reg c3 in
+            let f2 = fb_emit (np ++ " = getelementptr [" ++ to_string n ++ " x ptr], ptr " ++ narr ++ ", i64 0, i64 " ++ to_string i) f1 in
+            let f3 = fb_emit ("store ptr " ++ fgn ++ ", ptr " ++ np) f2 in
+            let f4 = fb_emit (vp ++ " = getelementptr [" ++ to_string n ++ " x ptr], ptr " ++ varr ++ ", i64 0, i64 " ++ to_string i) f3 in
+            let f5 = fb_emit ("store ptr " ++ fval ++ ", ptr " ++ vp) f4 in
+            go (i + 1) c4 f5
+        in
+        let (cg4, fb3) = go 0 cg3 fb2 in
+        let (r, cg5) = cg_fresh_reg cg4 in
+        (r, cg5, fb_emit (r ++ " = call ptr @cml_struct_make(ptr " ++ sgn ++ ", i64 " ++ to_string n ++ ", ptr " ++ narr ++ ", ptr " ++ varr ++ ")") fb3)
+  | EFieldGet obj fld ->
+      let (ov, cg1, fb1) = compile_expr obj false cg fb in
+      let (fgn, _, cg2) = cg_add_str fld cg1 in
+      let (r, cg3) = cg_fresh_reg cg2 in
+      (r, cg3, fb_emit (r ++ " = call ptr @cml_field_get(ptr " ++ ov ++ ", ptr " ++ fgn ++ ")") fb1)
+  | EFieldSet obj fld rhs ->
+      let (ov, cg1, fb1) = compile_expr obj false cg fb in
+      let (rv, cg2, fb2) = compile_expr rhs false cg1 fb1 in
+      let (fgn, _, cg3) = cg_add_str fld cg2 in
+      let (r, cg4) = cg_fresh_reg cg3 in
+      (r, cg4, fb_emit (r ++ " = call ptr @cml_field_set(ptr " ++ ov ++ ", ptr " ++ fgn ++ ", ptr " ++ rv ++ ")") fb2)
+  | ENew x ->
+      let (xv, cg1, fb1) = compile_expr x false cg fb in
+      let (r, cg2) = cg_fresh_reg cg1 in
+      (r, cg2, fb_emit (r ++ " = call ptr @cml_new(ptr " ++ xv ++ ")") fb1)
+  | EClose x ->
+      let (xv, cg1, fb1) = compile_expr x false cg fb in
+      let (r, cg2) = cg_fresh_reg cg1 in
+      (r, cg2, fb_emit (r ++ " = call ptr @cml_close(ptr " ++ xv ++ ")") fb1)
+  | EScopeDefer act body ->
+      let (bv, cg1, fb1) = compile_expr body false cg fb in
+      let (_, cg2, fb2) = compile_expr act false cg1 fb1 in
+      (bv, cg2, fb2)
+  | EDerefSet ptr rhs ->
+      let (pv, cg1, fb1) = compile_expr ptr false cg fb in
+      let (rv, cg2, fb2) = compile_expr rhs false cg1 fb1 in
+      let (r, cg3) = cg_fresh_reg cg2 in
+      (r, cg3, fb_emit (r ++ " = call ptr @cml_set_deref(ptr " ++ pv ++ ", ptr " ++ rv ++ ")") fb2)
+  | EPtrFieldGet ptr fld ->
+      let (pv, cg1, fb1) = compile_expr ptr false cg fb in
+      let (fgn, _, cg2) = cg_add_str fld cg1 in
+      let (r, cg3) = cg_fresh_reg cg2 in
+      (r, cg3, fb_emit (r ++ " = call ptr @cml_ptr_get(ptr " ++ pv ++ ", ptr " ++ fgn ++ ")") fb1)
+  | EPtrFieldSet ptr fld rhs ->
+      let (pv, cg1, fb1) = compile_expr ptr false cg fb in
+      let (rv, cg2, fb2) = compile_expr rhs false cg1 fb1 in
+      let (fgn, _, cg3) = cg_add_str fld cg2 in
+      let (r, cg4) = cg_fresh_reg cg3 in
+      (r, cg4, fb_emit (r ++ " = call ptr @cml_ptr_set(ptr " ++ pv ++ ", ptr " ++ fgn ++ ", ptr " ++ rv ++ ")") fb2)
+  | EImport s -> panic ("stage2 codegen error: unresolved import '" ++ s ++ "'"))
+
+  | CGFn fn_expr self_rec_opt ->
+      let caller_fb = fb in
+      (match fn_expr with
+  | EFn _ _ _ ->
+      let (params, body) = flatten_fn_expr fn_expr [] in
+      let arity = list_len params in
+      let bound0 = core.list_foldl (func a p -> list_append (pat_vars p []) a) [] params in
+      let encl_locals = core.list_map (func kv -> match kv with | (k, _) -> k) (fb_locals caller_fb) in
+      let fvs = collect_free_vars body bound0 encl_locals (cg_ctors cg) (cg_globals cg) [] in
+      let (fn_id, cg1) = cg_fresh_id cg in
+      let llvm_fn_name = "@__cml_fn_" ++ to_string fn_id in
+      let (loop_lbl, cg2) = cg_fresh_lbl "fn_loop" cg1 in
+      let rec mk_param_allocas i c acc =
+        if i >= arity then (list_rev acc, c)
+        else
+          let (r, c1) = cg_fresh_reg c in
+          mk_param_allocas (i + 1) c1 (r :: acc)
+      in
+      let (p_allocas, cg3) = mk_param_allocas 0 cg2 [] in
+      let self_info =
+        match self_rec_opt with
+        | Some nm -> SelfLoop nm arity loop_lbl p_allocas
+        | None -> NoSelf
+      in
+      let init_al = core.list_map (func reg -> "  " ++ reg ++ " = alloca ptr") p_allocas in
+      let fb_fn0 = FB init_al [] false self_info [] [] in
+      -- Load captured env variables into allocas
+      let nenv = list_len fvs in
+      let rec load_env i c f =
+        if i >= nenv then (c, f)
+        else
+          let nm = list_nth fvs i in
+          let (ep, c1) = cg_fresh_reg c in
+          let (ev, c2) = cg_fresh_reg c1 in
+          let (slot, c3, f1) = fb_alloc_slot "cap" c2 f in
+          let f2 = fb_emit (ep ++ " = getelementptr ptr, ptr %env, i64 " ++ to_string i) f1 in
+          let f3 = fb_emit (ev ++ " = load ptr, ptr " ++ ep) f2 in
+          let f4 = fb_emit ("store ptr " ++ ev ++ ", ptr " ++ slot) f3 in
+          load_env (i + 1) c3 (fb_bind_local nm slot f4)
+      in
+      let (cg4, fb_fn1) = load_env 0 cg3 fb_fn0 in
+      -- Load incoming %args into param allocas
+      let rec load_args i c f =
+        if i >= arity then (c, f)
+        else
+          let (ap, c1) = cg_fresh_reg c in
+          let (av, c2) = cg_fresh_reg c1 in
+          let f1 = fb_emit (ap ++ " = getelementptr ptr, ptr %args, i64 " ++ to_string i) f in
+          let f2 = fb_emit (av ++ " = load ptr, ptr " ++ ap) f1 in
+          let f3 = fb_emit ("store ptr " ++ av ++ ", ptr " ++ list_nth p_allocas i) f2 in
+          load_args (i + 1) c2 f3
+      in
+      let (cg5, fb_fn2) = load_args 0 cg4 fb_fn1 in
+      let fb_fn3 = fb_emit_lbl loop_lbl (fb_emit_term ("br label %" ++ loop_lbl) fb_fn2) in
+      -- Bind parameter patterns inside loop_lbl
+      let rec bind_params i c f =
+        if i >= arity then (c, f)
+        else
+          let (pv, c1) = cg_fresh_reg c in
+          let f1 = fb_emit (pv ++ " = load ptr, ptr " ++ list_nth p_allocas i) f in
+          let (c2, f2) = emit_pat_match_checked pv (list_nth params i) false c1 f1 in
+          bind_params (i + 1) c2 f2
+      in
+      let (cg6, fb_fn4) = bind_params 0 cg5 fb_fn3 in
+      let (ret_v, cg7, fb_fn5) = compile_expr body true cg6 fb_fn4 in
+      let fb_fn6 = if fb_is_term fb_fn5 then fb_fn5 else fb_emit_term ("ret ptr " ++ ret_v) fb_fn5 in
+      let (fn_allocas, fn_instrs) = match fb_fn6 with | FB al ins _ _ _ _ -> (list_rev al, list_rev ins) in
+      let fn_header = "define ptr " ++ llvm_fn_name ++ "(ptr %env, ptr %args) {\nentry:\n" in
+      let fn_str =
+        (fn_header ++
+         str_concat_list (core.list_map (func s -> s ++ "\n") fn_allocas) ++
+         str_concat_list (core.list_map (func s -> s ++ "\n") fn_instrs) ++
+         "}\n\n")
+      in
+      let cg8 = cg_add_fn_def fn_str cg7 in
+      -- Allocate closure in caller
+      if nenv == 0 then
+        let (clo_r, cg9) = cg_fresh_reg cg8 in
+        let cfb1 = fb_emit (clo_r ++ " = call ptr @cml_closure(ptr " ++ llvm_fn_name ++ ", i64 " ++ to_string arity ++ ", i64 0, ptr null)") caller_fb in
+        (clo_r, cg9, cfb1)
+      else
+        let (earr, cg9) = cg_fresh_reg cg8 in
+        let cfb1 = fb_add_alloca earr ("[" ++ to_string nenv ++ " x ptr]") caller_fb in
+        let rec fill_env i c f self_idx =
+          if i >= nenv then (self_idx, c, f)
+          else
+            let nm = list_nth fvs i in
+            let is_self = match self_rec_opt with | Some snm -> snm == nm | None -> false in
+            if is_self then
+              let (ep, c1) = cg_fresh_reg c in
+              let f1 = fb_emit (ep ++ " = getelementptr [" ++ to_string nenv ++ " x ptr], ptr " ++ earr ++ ", i64 0, i64 " ++ to_string i) f in
+              let f2 = fb_emit ("store ptr null, ptr " ++ ep) f1 in
+              fill_env (i + 1) c1 f2 i
+            else
+              let (vv, c1, f1) = compile_expr (EVar nm) false c f in
+              let (ep, c2) = cg_fresh_reg c1 in
+              let f2 = fb_emit (ep ++ " = getelementptr [" ++ to_string nenv ++ " x ptr], ptr " ++ earr ++ ", i64 0, i64 " ++ to_string i) f1 in
+              let f3 = fb_emit ("store ptr " ++ vv ++ ", ptr " ++ ep) f2 in
+              fill_env (i + 1) c2 f3 self_idx
+        in
+        let (self_idx, cg10, cfb2) = fill_env 0 cg9 cfb1 (-1) in
+        let (clo_r, cg11) = cg_fresh_reg cg10 in
+        let cfb3 = fb_emit (clo_r ++ " = call ptr @cml_closure(ptr " ++ llvm_fn_name ++ ", i64 " ++ to_string arity ++ ", i64 " ++ to_string nenv ++ ", ptr " ++ earr ++ ")") cfb2 in
+        let cfb4 =
+          if self_idx >= 0 then
+            fb_emit ("call void @cml_closure_set_env(ptr " ++ clo_r ++ ", i64 " ++ to_string self_idx ++ ", ptr " ++ clo_r ++ ")") cfb3
+          else cfb3
+        in
+        (clo_r, cg11, cfb4)
+  | _ -> compile_expr fn_expr false cg caller_fb)
+
+let compile_expr expr tail_pos cg fb = compile_cg (CGExpr expr tail_pos) cg fb
+let compile_fn_value fn_expr self_rec_opt cg caller_fb = compile_cg (CGFn fn_expr self_rec_opt) cg caller_fb
+
+let llvm_rt_decls =
+  ("declare void @cml_rt_init(i32, ptr)\n" ++
+   "declare ptr @cml_unit()\n" ++
+   "declare ptr @cml_int(i64)\n" ++
+   "declare ptr @cml_float(double)\n" ++
+   "declare ptr @cml_bool(i64)\n" ++
+   "declare ptr @cml_str(ptr, i64)\n" ++
+   "declare ptr @cml_nil()\n" ++
+   "declare ptr @cml_cons(ptr, ptr)\n" ++
+   "declare ptr @cml_tuple_make(i64, ptr)\n" ++
+   "declare ptr @cml_list_make(i64, ptr)\n" ++
+   "declare ptr @cml_adt_make(i64, ptr, i64, ptr)\n" ++
+   "declare ptr @cml_struct_make(ptr, i64, ptr, ptr)\n" ++
+   "declare ptr @cml_closure(ptr, i64, i64, ptr)\n" ++
+   "declare void @cml_closure_set_env(ptr, i64, ptr)\n" ++
+   "declare ptr @cml_apply1(ptr, ptr)\n" ++
+   "declare i64 @cml_is_true(ptr)\n" ++
+   "declare ptr @cml_neg(ptr)\n" ++
+   "declare ptr @cml_fneg(ptr)\n" ++
+   "declare ptr @cml_bitnot(ptr)\n" ++
+   "declare ptr @cml_not(ptr)\n" ++
+   "declare ptr @cml_add(ptr, ptr)\n" ++
+   "declare ptr @cml_sub(ptr, ptr)\n" ++
+   "declare ptr @cml_mul(ptr, ptr)\n" ++
+   "declare ptr @cml_div(ptr, ptr)\n" ++
+   "declare ptr @cml_mod(ptr, ptr)\n" ++
+   "declare ptr @cml_fadd(ptr, ptr)\n" ++
+   "declare ptr @cml_fsub(ptr, ptr)\n" ++
+   "declare ptr @cml_fmul(ptr, ptr)\n" ++
+   "declare ptr @cml_fdiv(ptr, ptr)\n" ++
+   "declare ptr @cml_bitand(ptr, ptr)\n" ++
+   "declare ptr @cml_bitor(ptr, ptr)\n" ++
+   "declare ptr @cml_bitxor(ptr, ptr)\n" ++
+   "declare ptr @cml_shl(ptr, ptr)\n" ++
+   "declare ptr @cml_shr(ptr, ptr)\n" ++
+   "declare ptr @cml_concat(ptr, ptr)\n" ++
+   "declare ptr @cml_eq(ptr, ptr)\n" ++
+   "declare ptr @cml_neq(ptr, ptr)\n" ++
+   "declare ptr @cml_lt(ptr, ptr)\n" ++
+   "declare ptr @cml_le(ptr, ptr)\n" ++
+   "declare ptr @cml_gt(ptr, ptr)\n" ++
+   "declare ptr @cml_ge(ptr, ptr)\n" ++
+   "declare ptr @cml_field_get(ptr, ptr)\n" ++
+   "declare ptr @cml_field_set(ptr, ptr, ptr)\n" ++
+   "declare ptr @cml_new(ptr)\n" ++
+   "declare ptr @cml_close(ptr)\n" ++
+   "declare ptr @cml_deref(ptr)\n" ++
+   "declare ptr @cml_set_deref(ptr, ptr)\n" ++
+   "declare ptr @cml_ptr_get(ptr, ptr)\n" ++
+   "declare ptr @cml_ptr_set(ptr, ptr, ptr)\n" ++
+   "declare ptr @cml_addr_of_cell(ptr)\n" ++
+   "declare i64 @cml_match_int(ptr, i64)\n" ++
+   "declare i64 @cml_match_float(ptr, double)\n" ++
+   "declare i64 @cml_match_bool(ptr, i64)\n" ++
+   "declare i64 @cml_match_str(ptr, ptr, i64)\n" ++
+   "declare i64 @cml_match_unit(ptr)\n" ++
+   "declare i64 @cml_match_tuple(ptr, i64)\n" ++
+   "declare i64 @cml_match_list_len(ptr, i64)\n" ++
+   "declare i64 @cml_match_cons(ptr)\n" ++
+   "declare i64 @cml_match_adt(ptr, i64)\n" ++
+   "declare ptr @cml_tuple_get(ptr, i64)\n" ++
+   "declare ptr @cml_list_get(ptr, i64)\n" ++
+   "declare ptr @cml_list_tail(ptr, i64)\n" ++
+   "declare ptr @cml_adt_field(ptr, i64)\n" ++
+   "declare void @cml_match_fail()\n" ++
+   "declare ptr @cml_builtin_closure(ptr)\n\n")
+
+let compile_program_to_llvm stmts print_last =
+  -- Pass 1: collect all ADT constructors and top-level globals
+  let rec collect_decls i next_tag gid ctors glbs =
+    if i >= list_len stmts then (list_rev ctors, list_rev glbs, gid)
+    else
+      match list_nth stmts i with
+      | SType _ cdefs ->
+          let rec add_c j nt g acc =
+            if j >= list_len cdefs then (nt, g, acc)
+            else
+              let (cname, ar) = list_nth cdefs j in
+              let gn = "@g_ctor_" ++ to_string g in
+              add_c (j + 1) (nt + 1) (g + 1) ((cname, nt, ar, gn) :: acc)
+          in
+          let (nt1, gid1, ctors1) = add_c 0 next_tag gid ctors in
+          collect_decls (i + 1) nt1 gid1 ctors1 glbs
+      | SStruct _ _ -> collect_decls (i + 1) next_tag gid ctors glbs
+      | SDefer _ -> collect_decls (i + 1) next_tag gid ctors glbs
+      | SLet _ pat _ ->
+          let pvs = pat_vars pat [] in
+          let rec add_g k g acc =
+            if k >= list_len pvs then (g, acc)
+            else
+              let nm = list_nth pvs k in
+              match assoc_find nm acc with
+              | Some _ -> add_g (k + 1) g acc
+              | None -> add_g (k + 1) (g + 1) ((nm, "@g_" ++ to_string g) :: acc)
+          in
+          let (gid1, glbs1) = add_g 0 gid glbs in
+          collect_decls (i + 1) next_tag gid1 ctors glbs1
+      | SVar pat _ ->
+          let pvs = pat_vars pat [] in
+          let rec add_g k g acc =
+            if k >= list_len pvs then (g, acc)
+            else
+              let nm = list_nth pvs k in
+              match assoc_find nm acc with
+              | Some _ -> add_g (k + 1) g acc
+              | None -> add_g (k + 1) (g + 1) ((nm, "@g_" ++ to_string g) :: acc)
+          in
+          let (gid1, glbs1) = add_g 0 gid glbs in
+          collect_decls (i + 1) next_tag gid1 ctors glbs1
+      | SExpr _ -> collect_decls (i + 1) next_tag gid ctors glbs
+  in
+  let (ctors, glbs, gid_end) = collect_decls 0 0 0 [] [] in
+  let cg0 = CGG gid_end [] [] ctors glbs in
+  let main_fb0 = FB [] [] false NoSelf [] [] in
+  let main_fb1 = fb_emit "call void @cml_rt_init(i32 %argc, ptr %argv)" main_fb0 in
+  -- Initialize ADT constructors
+  let rec init_ctors i c f =
+    if i >= list_len ctors then (c, f)
+    else
+      let (cname, tag, ar, gn) = list_nth ctors i in
+      let (cgn, _, c1) = cg_add_str cname c in
+      if ar == 0 then
+        let (r, c2) = cg_fresh_reg c1 in
+        let f1 = fb_emit (r ++ " = call ptr @cml_adt_make(i64 " ++ to_string tag ++ ", ptr " ++ cgn ++ ", i64 0, ptr null)") f in
+        let f2 = fb_emit ("store ptr " ++ r ++ ", ptr " ++ gn) f1 in
+        init_ctors (i + 1) c2 f2
+      else
+        let (fid, c2) = cg_fresh_id c1 in
+        let wname = "@__ctor_w_" ++ to_string fid in
+        let wdef =
+          ("define ptr " ++ wname ++ "(ptr %env, ptr %args) {\nentry:\n" ++
+           "  %r = call ptr @cml_adt_make(i64 " ++ to_string tag ++ ", ptr " ++ cgn ++ ", i64 " ++ to_string ar ++ ", ptr %args)\n" ++
+           "  ret ptr %r\n}\n\n")
+        in
+        let c3 = cg_add_fn_def wdef c2 in
+        let (r, c4) = cg_fresh_reg c3 in
+        let f1 = fb_emit (r ++ " = call ptr @cml_closure(ptr " ++ wname ++ ", i64 " ++ to_string ar ++ ", i64 0, ptr null)") f in
+        let f2 = fb_emit ("store ptr " ++ r ++ ", ptr " ++ gn) f1 in
+        init_ctors (i + 1) c4 f2
+  in
+  let (cg1, main_fb2) = init_ctors 0 cg0 main_fb1 in
+  -- Compile top-level statements into @main
+  let nstmts = list_len stmts in
+  let rec comp_stmts i c f defers =
+    if i >= nstmts then
+      let rec run_defs ds c0 f0 =
+        match ds with
+        | [] -> (c0, f0)
+        | act :: rest ->
+            let (_, c1, f1) = compile_expr act false c0 f0 in
+            run_defs rest c1 f1
+      in
+      run_defs defers c f
+    else
+      let is_last = i + 1 == nstmts in
+      match list_nth stmts i with
+      | SType _ _ -> comp_stmts (i + 1) c f defers
+      | SStruct _ _ -> comp_stmts (i + 1) c f defers
+      | SDefer act -> comp_stmts (i + 1) c f (act :: defers)
+      | SLet is_rec pat val_e ->
+          let self_opt =
+            if is_rec then
+              match pat with
+              | PVar nm -> Some nm
+              | _ -> None
+            else None
+          in
+          let (rv, c1, f1) = compile_fn_value val_e self_opt c f in
+          let (c2, f2) = emit_pat_match_checked rv pat true c1 f1 in
+          comp_stmts (i + 1) c2 f2 defers
+      | SVar pat val_e ->
+          let (rv, c1, f1) = compile_expr val_e false c f in
+          let (c2, f2) = emit_pat_match_checked rv pat true c1 f1 in
+          comp_stmts (i + 1) c2 f2 defers
+      | SExpr ex ->
+          let (rv, c1, f1) = compile_expr ex false c f in
+          if is_last && print_last then
+            let (sgn, _, c2) = cg_add_str "println" c1 in
+            let (pr_fn, c3) = cg_fresh_reg c2 in
+            let (ignored, c4) = cg_fresh_reg c3 in
+            let f2 = fb_emit (pr_fn ++ " = call ptr @cml_builtin_closure(ptr " ++ sgn ++ ")") f1 in
+            let f3 = fb_emit (ignored ++ " = call ptr @cml_apply1(ptr " ++ pr_fn ++ ", ptr " ++ rv ++ ")") f2 in
+            comp_stmts (i + 1) c4 f3 defers
+          else comp_stmts (i + 1) c1 f1 defers
+  in
+  let (cg2, main_fb3) = comp_stmts 0 cg1 main_fb2 [] in
+  let main_fb4 = fb_emit_term "ret i32 0" main_fb3 in
+  let (str_lits, fn_defs) =
+    match cg2 with
+    | CGG _ sl fds _ _ -> (list_rev sl, list_rev fds)
+  in
+  let str_decls =
+    str_concat_list (core.list_map (func item ->
+      match item with
+      | (gn, esc, blen) ->
+          gn ++ " = private unnamed_addr constant [" ++ to_string blen ++ " x i8] c\"" ++ esc ++ "\"\n"
+    ) str_lits)
+  in
+  let ctor_globals =
+    str_concat_list (core.list_map (func c ->
+      match c with
+      | (_, _, _, gn) -> gn ++ " = internal global ptr null\n"
+    ) ctors)
+  in
+  let var_globals =
+    str_concat_list (core.list_map (func g ->
+      match g with
+      | (_, gn) -> gn ++ " = internal global ptr null\n"
+    ) glbs)
+  in
+  let (m_allocas, m_instrs) = match main_fb4 with | FB al ins _ _ _ _ -> (list_rev al, list_rev ins) in
+  let main_str =
+    ("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n" ++
+     str_concat_list (core.list_map (func s -> s ++ "\n") m_allocas) ++
+     str_concat_list (core.list_map (func s -> s ++ "\n") m_instrs) ++
+     "}\n")
+  in
+  ("; CommonML Stage 2 Generated LLVM IR\n\n" ++
+   llvm_rt_decls ++
+   str_decls ++ "\n" ++
+   ctor_globals ++
+   var_globals ++ "\n" ++
+   str_concat_list fn_defs ++
+   main_str)

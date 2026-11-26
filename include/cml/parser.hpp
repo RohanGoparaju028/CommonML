@@ -32,9 +32,8 @@ private:
 
     StmtPtr parse_stmt(bool in_block = false);
     StmtPtr parse_type_decl();
-    StmtPtr parse_struct_decl();
     StmtPtr parse_struct_body(const SourceSpan& start_span, const Ident& struct_name,
-                              std::vector<Ident> type_params);
+                              std::vector<Ident> type_params, size_t kw_col = 0);
     StmtPtr parse_let_stmt(bool in_block = false);
     StmtPtr parse_var_stmt();
     StmtPtr parse_macro_stmt();
@@ -54,11 +53,11 @@ private:
     Param parse_param();
 
     ExprPtr parse_expr();
-    ExprPtr parse_block();
-    ExprPtr parse_block_or_expr();
+    ExprPtr parse_block(size_t min_indent_col = 0);
+    ExprPtr parse_block_or_expr(size_t min_indent_col = 0);
     ExprPtr parse_seq_expr();
     ExprPtr parse_let_expr();
-    ExprPtr parse_fn_expr();
+    ExprPtr parse_func_expr();
     ExprPtr parse_if_expr();
     ExprPtr parse_match_expr();
     ExprPtr parse_while_expr();

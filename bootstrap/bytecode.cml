@@ -117,7 +117,7 @@ let serialize_bprogram prog =
   match prog with
   | BProg ctors protos entry_id ->
       let ctor_lines =
-        core.list_map (fn c ->
+        core.list_map (func c ->
           match c with
           | (nm, tag, ar) -> "CTOR " ++ nm ++ " " ++ to_string tag ++ " " ++ to_string ar ++ "\n"
         ) ctors
@@ -131,13 +131,13 @@ let serialize_bprogram prog =
             | BPr name arity num_loc upvals consts names code ->
                 let hdr = "PROTO " ++ to_string id ++ " " ++ to_string arity ++ " " ++ to_string num_loc ++ " " ++ len_str name in
                 let uv_lines =
-                  core.list_map (fn uv ->
+                  core.list_map (func uv ->
                     match uv with
                     | (is_l, idx) -> "UPVAL " ++ (if is_l then "1" else "0") ++ " " ++ to_string idx ++ "\n"
                   ) upvals
                 in
                 let c_lines =
-                  core.list_map (fn c ->
+                  core.list_map (func c ->
                     match c with
                     | BCUnit -> "CONST U\n"
                     | BCInt x -> "CONST I " ++ to_string x ++ "\n"
@@ -147,9 +147,9 @@ let serialize_bprogram prog =
                     | BCProto pid -> "CONST P " ++ to_string pid ++ "\n"
                   ) consts
                 in
-                let n_lines = core.list_map (fn nm -> "NAME " ++ len_str nm) names in
+                let n_lines = core.list_map (func nm -> "NAME " ++ len_str nm) names in
                 let ins_lines =
-                  core.list_map (fn ins ->
+                  core.list_map (func ins ->
                     match ins with
                     | BIns op a1 a2 -> "CODE " ++ bop_name op ++ " " ++ to_string a1 ++ " " ++ to_string a2 ++ "\n"
                   ) code

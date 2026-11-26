@@ -14,7 +14,7 @@ type TokKind =
   | TKKwLet
   | TKKwRec
   | TKKwIn
-  | TKKwFn
+  | TKKwFunc
   | TKKwIf
   | TKKwThen
   | TKKwElse

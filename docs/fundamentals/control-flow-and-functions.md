@@ -12,12 +12,12 @@ CommonML uses whitespace-significant indentation after `=` and `:` block headers
 Both ML curried bindings and systems-style typed signatures are supported:
 
 ```text
--- Systems-style signature with explicit parameter & return types
-let add = fn(a: i32, b: i32) : i32:
-  a + b
+-- Systems-style signature with explicit parameter & -> return types (indented relative to `func`)
+let add = func(a: i32, b: i32) -> i32:
+            a + b
 
-let area = fn() : i32:
-  10 * 20
+let area = func() -> i32:
+             10 * 20
 
 -- ML-style curried definition
 let rec fact n =

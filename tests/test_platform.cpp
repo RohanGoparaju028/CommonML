@@ -207,22 +207,22 @@ tc.check_program_stmts (prs.parse_program_tokens (lex.lex_source "1 + true"))
                       CompileError);
 
     // Verify self-hosted bootstrap compiler compiles new systems syntax:
-    // `let rect = struct:`, `new rect { .x = 10, .y = 20 }`, `fn() : i32:`, `->`, `defer close`, `String`/`Bool`
+    // `let rect = struct:`, `new rect { .x = 10, .y = 20 }`, `func() -> i32:`, `->`, `defer close`, `String`/`Bool`
     EvalResult r4 = p2.eval_source("boot_sys.cml", R"(
 let prog = "
 let rect = struct:
-  x: i32
-  y: i32
-  label: str
-  active: bool
+             x: i32
+             y: i32
+             label: str
+             active: bool
 
-let area = fn() : i32:
-  let var_rect = new rect { .x = 10, .y = 20, .label = \"box\", .active = true }
-  defer close var_rect
-  if var_rect->active && str_len var_rect->label == 3 =
-    var_rect->x * var_rect->y
-  else =
-    0
+let area = func() -> i32:
+             let var_rect = new rect { .x = 10, .y = 20, .label = \"box\", .active = true }
+             defer close var_rect
+             if var_rect->active && str_len var_rect->label == 3 =
+               var_rect->x * var_rect->y
+             else =
+               0
 
 let res = area ()
 (res, heap_live_count ())
@@ -310,12 +310,12 @@ CML_TEST(platform_toolchain_compile_output_and_relocatable_stdlib) {
 CML_TEST(platform_structs_indentation_and_three_loops) {
     Pipeline p;
     EvalResult res = p.eval_source("loops_structs.cml", R"(
-struct Point
-  x : Float
-  y : Float
+let Point = struct:
+              x : Float
+              y : Float
 
-struct Box a
-  value : a
+let Box a = struct:
+              value : a
 
 let sum_to n =
   var acc = 0
@@ -420,14 +420,14 @@ CML_TEST(platform_systems_structs_pointers_defer_and_numerics) {
     Pipeline p;
     EvalResult res = p.eval_source("systems_test.cml", R"(
 let rect = struct:
-  x: i32
-  y: i32
-  name: str
-  ok: bool
+             x: i32
+             y: i32
+             name: str
+             ok: bool
 
 let var_rect = new rect { .x = 10, .y = 20, .name = "main", .ok = true }
-let area = fn() : i32:
-  var_rect->x * var_rect->y
+let area = func() -> i32:
+             var_rect->x * var_rect->y
 
 let live_before_close = heap_live_count ()
 let a1 = area ()
@@ -443,13 +443,13 @@ r_ptr->y = 5
 let stack_area = r_val.x * r_val.y
 
 -- Pointer dereference `*` and `&` on mutable scalar + defer LIFO cleanup
-let calc_with_defer = fn() : i32:
-  let h = new rect { .x = 6, .y = 7, .name = "scoped", .ok = true }
-  defer close h
-  var counter : i32 = 10
-  let cp = &counter
-  *cp = *cp + 5
-  (h->x * h->y) + counter
+let calc_with_defer = func() -> i32:
+                        let h = new rect { .x = 6, .y = 7, .name = "scoped", .ok = true }
+                        defer close h
+                        var counter : i32 = 10
+                        let cp = &counter
+                        *cp = *cp + 5
+                        (h->x * h->y) + counter
 
 let scoped_val = calc_with_defer ()
 let live_after_defer = heap_live_count ()
@@ -471,8 +471,8 @@ let greeting : string = r_val.name ++ "_ok"
     Pipeline p_dot_err;
     CML_ASSERT_THROWS(p_dot_err.eval_source("dot_err.cml", R"(
 let rect = struct:
-  x: i32
-  y: i32
+             x: i32
+             y: i32
 let r = new rect { .x = 1, .y = 2 }
 r.x
 )"),
@@ -482,8 +482,8 @@ r.x
     Pipeline p_uaf;
     CML_ASSERT_THROWS(p_uaf.eval_source("uaf.cml", R"(
 let rect = struct:
-  x: i32
-  y: i32
+             x: i32
+             y: i32
 let r = new rect { .x = 1, .y = 2 }
 close r
 r->x
@@ -506,6 +506,18 @@ let b : i64 = 2
 a + b
 )"),
                       CompileError);
+
+    // 4. Keyword-column indentation and assignment-only struct syntax checks
+    Pipeline p_ind;
+    CML_ASSERT_THROWS(p_ind.eval_source("bad_struct_ind.cml",
+                                        "let rect = struct:\n  x: i32\n"),
+                      CompileError);
+    CML_ASSERT_THROWS(p_ind.eval_source("bad_func_ind.cml",
+                                        "let f = func() -> i32:\n  42\n"),
+                      CompileError);
+    CML_ASSERT_THROWS(p_ind.eval_source("standalone_struct.cml",
+                                        "struct Rect:\n  x: i32\n"),
+                      CompileError);
 }
 
 CML_TEST(platform_debugger_cli_and_dap) {
@@ -514,8 +526,8 @@ CML_TEST(platform_debugger_cli_and_dap) {
     {
         std::ofstream f(dbg_file);
         f << "let rect = struct:\n"
-          << "  x: i32\n"
-          << "  y: i32\n"
+          << "             x: i32\n"
+          << "             y: i32\n"
           << "\n"
           << "let calc a =\n"
           << "  let r = new rect { .x = a, .y = 5 }\n"

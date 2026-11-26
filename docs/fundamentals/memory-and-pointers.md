@@ -13,13 +13,13 @@ CommonML provides deterministic memory management combining **explicit heap owne
 
 ```text
 let rect = struct:
-  x: i32
-  y: i32
+             x: i32
+             y: i32
 
-let compute = fn() : i32:
-  let var_rect = new rect { .x = 10, .y = 20 }
-  defer close var_rect
-  var_rect->x * var_rect->y
+let compute = func() -> i32:
+                let var_rect = new rect { .x = 10, .y = 20 }
+                defer close var_rect
+                var_rect->x * var_rect->y
 ```
 
 - `new <expr>` allocates a tracked `HeapCell` and increments `heap_live_count ()`.

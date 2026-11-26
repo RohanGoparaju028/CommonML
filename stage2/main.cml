@@ -1,0 +1,65 @@
+-- Stage 2 CommonML Compiler Driver (Pure CommonML -> LLVM IR -> Native Binary via clang)
+let mod = import "module_loader.cml"
+let tc = import "typecheck.cml"
+let cg = import "llvm_codegen.cml"
+
+let find_stdlib_dir _ =
+  if file_exists "stdlib/core.cml" then "stdlib"
+  else if file_exists "../stdlib/core.cml" then "../stdlib"
+  else "/usr/local/share/commonml/stdlib"
+
+let find_rt_c _ =
+  if file_exists "stage2/runtime/cml_rt.c" then "stage2/runtime/cml_rt.c"
+  else if file_exists "runtime/cml_rt.c" then "runtime/cml_rt.c"
+  else if file_exists "../stage2/runtime/cml_rt.c" then "../stage2/runtime/cml_rt.c"
+  else panic "stage2 error: could not locate stage2/runtime/cml_rt.c"
+
+let compile_file_to_llvm in_file print_last =
+  let stdlib_dir = find_stdlib_dir () in
+  let stmts = mod.bundle_entry in_file stdlib_dir in
+  let ty = tc.check_program_stmts stmts in
+  let ir = cg.compile_program_to_llvm stmts print_last in
+  (ty, ir)
+
+let print_usage _ =
+  println "Usage: cml2 [options] <input.cml>"
+  println "Options:"
+  println "  -o <output>     Output executable or .ll path"
+  println "  --emit-llvm     Write LLVM IR (.ll) only"
+  println "  --print-last    Print final top-level expression value"
+
+let rec parse_cli args in_f out_f emit_ll print_last =
+  match args with
+  | [] -> (in_f, out_f, emit_ll, print_last)
+  | a :: rest ->
+      if a == "-o" then
+        if is_empty rest then panic "stage2 error: -o requires an argument"
+        else parse_cli (tail rest) in_f (head rest) emit_ll print_last
+      else if a == "--emit-llvm" then
+        parse_cli rest in_f out_f true print_last
+      else if a == "--print-last" then
+        parse_cli rest in_f out_f emit_ll true
+      else
+        parse_cli rest a out_f emit_ll print_last
+
+let args = cli_args ()
+let _ =
+  if is_empty args then
+    print_usage ()
+  else
+    let (in_file, out_arg, emit_ll, print_last) = parse_cli args "" "" false false in
+    if in_file == "" then panic "stage2 error: no input .cml file specified"
+    else
+      let (ty, ir) = compile_file_to_llvm in_file print_last in
+      let out_path = if out_arg == "" then "a.out" else out_arg in
+      let ll_path = if emit_ll then out_path else out_path ++ ".ll" in
+      let _ = write_file ll_path ir in
+      if emit_ll then
+        println ("Emitted LLVM IR: " ++ ll_path ++ " (" ++ tc.ty_to_str ty ++ ")")
+      else
+        let rt_c = find_rt_c () in
+        let cmd = "clang -O2 -Wno-override-module \"" ++ ll_path ++ "\" \"" ++ rt_c ++ "\" -lm -o \"" ++ out_path ++ "\"" in
+        let rc = sys_exec cmd in
+        if rc != 0 then panic ("stage2 error: clang failed with exit code " ++ to_string rc)
+        else
+          println ("Compiled native binary: " ++ out_path ++ " (" ++ tc.ty_to_str ty ++ ")")

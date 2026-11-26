@@ -716,6 +716,18 @@ void append_io_builtins(std::vector<BuiltinDef>& list) {
         },
     });
 
+    // sys_exec : String -> Int
+    list.push_back(BuiltinDef{
+        "sys_exec",
+        TypeScheme{{}, make_tfun(string_type(), int_type())},
+        1,
+        [](const std::vector<Value>& args) {
+            const auto& cmd = std::get<ValString>(args[0].node).value;
+            int rc = std::system(cmd.c_str());
+            return Value::make_int(static_cast<int64_t>(rc));
+        },
+    });
+
     // vm_exec_bytecode : String -> String
     list.push_back(BuiltinDef{
         "vm_exec_bytecode",

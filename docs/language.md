@@ -52,8 +52,8 @@ let area r =
   let pi = 3.14159 in
   pi *. r *. r
 
-let double = fn x -> x * 2
-let typed_add = fn (x : Int) (y : Int) -> x + y
+let double = func x -> x * 2
+let typed_add = func (x : Int) (y : Int) -> x + y
 ```
 
 Grouping sequences:
@@ -109,7 +109,7 @@ Supported patterns:
 ## Structs, Imports, Indentation Blocks, Loops & Collections
 
 - **Assignment imports**: `let math = import "std/math"` then `math.sqrt 16.0`, `math.pi`.
-- **Structures**: `struct Point` with indented `x : Float` / `y : Float` fields, `Point { x = 1.0, y = 2.0 }`, field read `p.x`, field mutation `p.x = 5.0`.
+- **Structures**: `let Point = struct:` with fields indented past `struct` (`x : Float` / `y : Float`), `Point { x = 1.0, y = 2.0 }`, field read `p.x`, field mutation `p.x = 5.0`.
 - **Indentation blocks & mutable `var`**: Functions, `if`/`else`, `match`, and loops use indentation blocks; `var x = 0` allows `x = x + 1`.
 - **Loops**: `while cond`, C-style `for (var i = 0; i < n; i = i + 1)`, and `for each x in collection`, with `break` and `continue`.
 - **Collections**: `Vector 'a` (`vec_new`, `vec_push`, `vec_pop`, `vec_get`, `vec_set`, `vec_len`, `vec_to_list`, `vec_from_list`), `Dict 'k 'v` (`dict_new`, `dict_set`, `dict_get`, `dict_get_or`, `dict_has`, `dict_remove`, `dict_keys`, `dict_values`, `dict_len`), and `Set 'a` (`set_new`, `set_add`, `set_has`, `set_remove`, `set_len`, `set_values`).

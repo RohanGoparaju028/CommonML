@@ -16,7 +16,7 @@ const char* ansi_for_token(TokenKind kind) {
         case TokenKind::KwVar:
         case TokenKind::KwRec:
         case TokenKind::KwIn:
-        case TokenKind::KwFn:
+        case TokenKind::KwFunc:
         case TokenKind::KwIf:
         case TokenKind::KwThen:
         case TokenKind::KwElse:

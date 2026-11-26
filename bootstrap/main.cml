@@ -30,7 +30,7 @@ let run_self_tests _ =
   let (t3, v3) = boot_run p3
   let _ = if v3 != "10" then panic ("self-test 3 failed: got " ++ v3) else ()
 
-  let p4 = "let make_adder x = fn y -> x + y\nlet add10 = make_adder 10\nlet rec count_down n acc = if n == 0 then acc else count_down (n - 1) (acc + 1)\n(add10 32, count_down 10000 0)"
+  let p4 = "let make_adder x = func y -> x + y\nlet add10 = make_adder 10\nlet rec count_down n acc = if n == 0 then acc else count_down (n - 1) (acc + 1)\n(add10 32, count_down 10000 0)"
   let (t4, v4) = boot_run p4
   let _ = if v4 != "(42, 10000)" then panic ("self-test 4 failed: got " ++ v4) else ()
 

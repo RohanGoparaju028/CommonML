@@ -139,19 +139,19 @@ let rec free_vars subst t =
   match apply_ty subst t with
   | BTVar id -> [id]
   | BTList inner -> free_vars subst inner
-  | BTTuple elems -> core.list_foldl (fn acc e -> list_append acc (free_vars subst e)) [] elems
+  | BTTuple elems -> core.list_foldl (func acc e -> list_append acc (free_vars subst e)) [] elems
   | BTFun a b -> list_append (free_vars subst a) (free_vars subst b)
   | BTPtr inner -> free_vars subst inner
   | _ -> []
 
 let env_lookup name env =
-  core.list_find (fn kv -> match kv with | (k, _) -> k == name) env
+  core.list_find (func kv -> match kv with | (k, _) -> k == name) env
 
 let env_free_vars subst env =
-  core.list_foldl (fn acc kv ->
+  core.list_foldl (func acc kv ->
     match kv with
     | (_, BSch qvars t) ->
-        let fv = core.list_filter (fn id -> not (core.list_any (fn q -> q == id) qvars)) (free_vars subst t) in
+        let fv = core.list_filter (func id -> not (core.list_any (func q -> q == id) qvars)) (free_vars subst t) in
         list_append acc fv
   ) [] env
 
@@ -159,7 +159,7 @@ let generalize env subst t =
   let rt = apply_ty subst t in
   let efv = env_free_vars subst env in
   let fv = free_vars subst rt in
-  let q = core.list_filter (fn id -> not (core.list_any (fn e -> e == id) efv)) fv in
+  let q = core.list_filter (func id -> not (core.list_any (func e -> e == id) efv)) fv in
   BSch q rt
 
 let instantiate sch next_id =
@@ -225,7 +225,7 @@ let rec resolve_te te structs =
   match te with
   | TEPtr inner -> BTPtr (resolve_te inner structs)
   | TEFun a b -> BTFun (resolve_te a structs) (resolve_te b structs)
-  | TETuple elems -> BTTuple (core.list_map (fn e -> resolve_te e structs) elems)
+  | TETuple elems -> BTTuple (core.list_map (func e -> resolve_te e structs) elems)
   | TECon nm args ->
       if nm == "Int" || nm == "int" then BTInt
       else if is_fixed_int_name nm then BTFixed nm
@@ -261,7 +261,7 @@ let lookup_struct_field sname fname structs =
   match env_lookup sname structs with
   | None -> panic ("bootstrap type error: unknown struct '" ++ sname ++ "'")
   | Some (_, fields) ->
-      match core.list_find (fn kv -> match kv with | (k, _) -> k == fname) fields with
+      match core.list_find (func kv -> match kv with | (k, _) -> k == fname) fields with
       | None -> panic ("bootstrap type error: struct '" ++ sname ++ "' has no field '" ++ fname ++ "'")
       | Some (_, ft) -> ft
 
@@ -358,7 +358,7 @@ let rec infer_expr expr env ctors structs subst nid =
       (apply_ty s5 tt, s5, n3)
   | EFn pat body ->
       let (pt, bs, s1, n1) = infer_pat pat env ctors subst nid in
-      let env2 = list_append (core.list_map (fn kv -> match kv with | (k, v) -> (k, BSch [] v)) bs) env in
+      let env2 = list_append (core.list_map (func kv -> match kv with | (k, v) -> (k, BSch [] v)) bs) env in
       let (bt, s2, n2) = infer_expr body env2 ctors structs s1 n1 in
       (BTFun (apply_ty s2 pt) bt, s2, n2)
   | EApp f a ->
@@ -380,7 +380,7 @@ let rec infer_expr expr env ctors structs subst nid =
         let (tv, s1, n1) = infer_expr val_e env ctors structs subst nid in
         let (tp, bs, s2, n2) = infer_pat pat env ctors s1 n1 in
         let s3 = unify_ty tp tv s2 in
-        let bs_sch = core.list_map (fn kv -> match kv with | (k, v) -> (k, generalize env s3 v)) bs in
+        let bs_sch = core.list_map (func kv -> match kv with | (k, v) -> (k, generalize env s3 v)) bs in
         infer_expr body (list_append bs_sch env) ctors structs s3 n2
   | EMatch scrut arms ->
       let (ts, s1, n1) = infer_expr scrut env ctors structs subst nid in
@@ -391,7 +391,7 @@ let rec infer_expr expr env ctors structs subst nid =
           let (p, b) = list_nth arms i in
           let (tp, bs, s2, n2) = infer_pat p env ctors s n in
           let s3 = unify_ty ts tp s2 in
-          let env_arm = list_append (core.list_map (fn kv -> match kv with | (k, v) -> (k, BSch [] v)) bs) env in
+          let env_arm = list_append (core.list_map (func kv -> match kv with | (k, v) -> (k, BSch [] v)) bs) env in
           let (tb, s4, n3) = infer_expr b env_arm ctors structs s3 n2 in
           let s5 = unify_ty res_tv tb s4 in
           go (i + 1) s5 n3
@@ -488,7 +488,7 @@ let check_program_stmts stmts =
       | SType tname cdefs ->
           let adt_ty = BTAdt tname in
           let new_ctors =
-            core.list_map (fn ca ->
+            core.list_map (func ca ->
               match ca with
               | (cname, arity) ->
                   let rec mk_fn k n_acc =
@@ -502,7 +502,7 @@ let check_program_stmts stmts =
           go (i + 1) env (list_append new_ctors ctors) structs subst nid BTUnit
       | SStruct sname fdecls ->
           let resolved_fs =
-            core.list_map (fn fv ->
+            core.list_map (func fv ->
               match fv with
               | (fnm, te) -> (fnm, resolve_te te structs)
             ) fdecls
@@ -521,7 +521,7 @@ let check_program_stmts stmts =
             let (tv, s1, n1) = infer_expr val_e env ctors structs subst nid in
             let (tp, bs, s2, n2) = infer_pat pat env ctors s1 n1 in
             let s3 = unify_ty tp tv s2 in
-            let bs_sch = core.list_map (fn kv -> match kv with | (k, v) -> (k, generalize env s3 v)) bs in
+            let bs_sch = core.list_map (func kv -> match kv with | (k, v) -> (k, generalize env s3 v)) bs in
             go (i + 1) (list_append bs_sch env) ctors structs s3 n2 (apply_ty s3 tv)
       | SExpr e ->
           let (te, s1, n1) = infer_expr e env ctors structs subst nid in
