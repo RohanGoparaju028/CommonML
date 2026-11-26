@@ -1,0 +1,57 @@
+-- Bootstrap CommonML Compiler Driver (Lexer + Parser + HM TypeChecker + Bytecode Compiler + VM)
+let lex = import "lexer.cml"
+let prs = import "parser.cml"
+let tc = import "typecheck.cml"
+let bc = import "bytecode.cml"
+let comp = import "compiler.cml"
+
+let boot_compile source =
+  let toks = lex.lex_source source
+  let stmts = prs.parse_program_tokens toks
+  let ty = tc.check_program_stmts stmts
+  let bc_prog = comp.compile_program_to_bc stmts
+  (ty, bc.serialize_bprogram bc_prog)
+
+let boot_run source =
+  let (ty, bc_str) = boot_compile source
+  let out = vm_exec_bytecode bc_str
+  (ty, out)
+
+let run_self_tests _ =
+  let p1 = "let rec fact n = if n <= 1 then 1 else n * fact (n - 1)\nfact 6"
+  let (t1, v1) = boot_run p1
+  let _ = if v1 != "720" then panic ("self-test 1 failed: got " ++ v1) else ()
+
+  let p2 = "type Tree a = Leaf | Node (Tree a) a (Tree a)\nlet rec sum_tree t = match t with | Leaf -> 0 | Node l v r -> sum_tree l + v + sum_tree r\nsum_tree (Node (Node Leaf 10 Leaf) 20 (Node Leaf 12 Leaf))"
+  let (t2, v2) = boot_run p2
+  let _ = if v2 != "42" then panic ("self-test 2 failed: got " ++ v2) else ()
+
+  let p3 = "let xs = [1.5, 2.5, 3.0, 3.0]\nlet rec sumf ys = match ys with | [] -> 0.0 | h :: t -> h +. sumf t\nsumf xs"
+  let (t3, v3) = boot_run p3
+  let _ = if v3 != "10" then panic ("self-test 3 failed: got " ++ v3) else ()
+
+  let p4 = "let make_adder x = fn y -> x + y\nlet add10 = make_adder 10\nlet rec count_down n acc = if n == 0 then acc else count_down (n - 1) (acc + 1)\n(add10 32, count_down 10000 0)"
+  let (t4, v4) = boot_run p4
+  let _ = if v4 != "(42, 10000)" then panic ("self-test 4 failed: got " ++ v4) else ()
+
+  println ("Bootstrap compiler self-tests passed: fact 6 = " ++ v1 ++ " : " ++ tc.ty_to_str t1 ++ ", sum_tree = " ++ v2 ++ " : " ++ tc.ty_to_str t2 ++ ", float sum = " ++ v3 ++ " : " ++ tc.ty_to_str t3 ++ ", closure/TCO = " ++ v4 ++ " : " ++ tc.ty_to_str t4)
+
+let args = cli_args ()
+let _ =
+  if is_empty args then
+    run_self_tests ()
+  else
+    let first = list_nth args 0
+    if first == "-e" && list_len args >= 2 then
+      let (ty, val) = boot_run (list_nth args 1)
+      println (val ++ " : " ++ tc.ty_to_str ty)
+    else if first == "-c" && list_len args >= 2 then
+      let in_file = list_nth args 1
+      let out_file = if list_len args >= 4 && list_nth args 2 == "-o" then list_nth args 3 else in_file ++ "bc"
+      let (_, bc_str) = boot_compile (read_file in_file)
+      write_file out_file bc_str
+      println ("Compiled " ++ in_file ++ " -> " ++ out_file)
+    else
+      let src = read_file first
+      let (ty, val) = boot_run src
+      println (val ++ " : " ++ tc.ty_to_str ty)

@@ -1,0 +1,142 @@
+-- Bootstrap CommonML AST & Token Datatypes
+let core = import "std/core"
+
+type TokKind =
+  | TKEof
+  | TKNewline
+  | TKIndent
+  | TKDedent
+  | TKInt
+  | TKFloat
+  | TKString
+  | TKLower
+  | TKUpper
+  | TKKwLet
+  | TKKwRec
+  | TKKwIn
+  | TKKwFn
+  | TKKwIf
+  | TKKwThen
+  | TKKwElse
+  | TKKwMatch
+  | TKKwWith
+  | TKKwType
+  | TKKwStruct
+  | TKKwNew
+  | TKKwDefer
+  | TKKwClose
+  | TKKwTrue
+  | TKKwFalse
+  | TKKwBegin
+  | TKKwEnd
+  | TKLParen
+  | TKRParen
+  | TKLBracket
+  | TKRBracket
+  | TKLBrace
+  | TKRBrace
+  | TKComma
+  | TKColon
+  | TKColonColon
+  | TKSemi
+  | TKPipe
+  | TKPipeGt
+  | TKArrow
+  | TKDot
+  | TKBang
+  | TKAmp
+  | TKCaret
+  | TKTilde
+  | TKUnderscore
+  | TKEq
+  | TKEqEq
+  | TKBangEq
+  | TKLt
+  | TKLtEq
+  | TKGt
+  | TKGtEq
+  | TKLtLt
+  | TKGtGt
+  | TKPlus
+  | TKMinus
+  | TKStar
+  | TKSlash
+  | TKPercent
+  | TKPlusDot
+  | TKMinusDot
+  | TKStarDot
+  | TKSlashDot
+  | TKPlusPlus
+  | TKAmpAmp
+  | TKPipePipe
+
+type BToken = BTok TokKind String Int Float Int Int
+
+type BTypeExpr =
+  | TECon String (List BTypeExpr)
+  | TEFun BTypeExpr BTypeExpr
+  | TETuple (List BTypeExpr)
+  | TEPtr BTypeExpr
+
+type BUnOp =
+  | UNegInt
+  | UNegFloat
+  | UBitNot
+  | ULogicalNot
+  | UDeref
+  | UAddrOf
+
+type BBinOp =
+  | BAddInt | BSubInt | BMulInt | BDivInt | BModInt
+  | BAddFloat | BSubFloat | BMulFloat | BDivFloat
+  | BBitAnd | BBitOr | BBitXor | BShl | BShr
+  | BConcat | BCons
+  | BEq | BNeq | BLt | BLe | BGt | BGe
+  | BAnd | BOr | BPipe | BSeq
+
+type BPat =
+  | PWild
+  | PVar String
+  | PInt Int
+  | PFloat Float
+  | PBool Bool
+  | PString String
+  | PUnit
+  | PTuple (List BPat)
+  | PList (List BPat)
+  | PCons BPat BPat
+  | PCtor String (List BPat)
+
+type BExpr =
+  | EInt Int
+  | EFloat Float
+  | EBool Bool
+  | EString String
+  | EUnit
+  | EVar String
+  | ECtor String
+  | ETuple (List BExpr)
+  | EList (List BExpr)
+  | EUnary BUnOp BExpr
+  | EBin BBinOp BExpr BExpr
+  | EIf BExpr BExpr BExpr
+  | ELet Bool BPat BExpr BExpr
+  | EFn BPat BExpr
+  | EApp BExpr BExpr
+  | EMatch BExpr (List (BPat * BExpr))
+  | EAnnot BExpr BTypeExpr
+  | EStructLit String (List (String * BExpr))
+  | EFieldGet BExpr String
+  | EFieldSet BExpr String BExpr
+  | ENew BExpr
+  | EClose BExpr
+  | EScopeDefer BExpr BExpr
+  | EDerefSet BExpr BExpr
+  | EPtrFieldGet BExpr String
+  | EPtrFieldSet BExpr String BExpr
+
+type BStmt =
+  | SType String (List (String * Int))
+  | SStruct String (List (String * BTypeExpr))
+  | SLet Bool BPat BExpr
+  | SExpr BExpr

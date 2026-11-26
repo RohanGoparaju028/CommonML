@@ -102,4 +102,17 @@ void Compiler::pop_locals_to(size_t count, const SourceSpan& span) {
     }
 }
 
+void Compiler::emit_defer_actions(const std::vector<ExprPtr>& actions, const SourceSpan& span) {
+    for (size_t i = actions.size(); i-- > 0;) {
+        compile_expr_impl(actions[i], false);
+        emit(OpCode::Pop, 0, 0, span);
+    }
+}
+
+void Compiler::emit_defers_down_to(size_t target_depth, const SourceSpan& span) {
+    for (size_t i = current_->defer_frames.size(); i > target_depth; --i) {
+        emit_defer_actions(current_->defer_frames[i - 1].actions, span);
+    }
+}
+
 }  // namespace cml

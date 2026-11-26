@@ -1,0 +1,174 @@
+-- Bootstrap CommonML Bytecode Representation & Serializer
+let core = import "std/core"
+let tc = import "typecheck.cml"
+
+type BOp =
+  | OpConst | OpPop | OpDup
+  | OpGetLocal | OpSetLocal | OpGetUpvalue | OpSetUpvalue | OpCloseUpvalue
+  | OpGetGlobal | OpDefGlobal
+  | OpNegInt | OpNegFloat | OpBitNot | OpLogicalNot
+  | OpAddInt | OpSubInt | OpMulInt | OpDivInt | OpModInt
+  | OpAddFloat | OpSubFloat | OpMulFloat | OpDivFloat
+  | OpBitAnd | OpBitOr | OpBitXor | OpShl | OpShr
+  | OpConcatStr | OpCons
+  | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
+  | OpMakeTuple | OpMakeList | OpMakeAdt | OpMakeStruct
+  | OpGetField | OpSetField
+  | OpNewHeap | OpCloseHeap | OpDerefPtr | OpSetDeref
+  | OpGetPtrField | OpSetPtrField | OpAddrOfLocal | OpAddrOfGlobal
+  | OpMakeClosure
+  | OpJump | OpJumpIfFalse | OpJumpIfTrue
+  | OpCall | OpTailCall | OpReturn
+  | OpMatchBool | OpMatchInt | OpMatchFloat | OpMatchString | OpMatchUnit
+  | OpMatchTuple | OpMatchListLen | OpMatchCons | OpMatchAdt
+  | OpTupleGet | OpListGet | OpListTail | OpAdtField | OpMatchFail
+
+type BInstr = BIns BOp Int Int
+
+type BConst =
+  | BCUnit
+  | BCInt Int
+  | BCFloat Float
+  | BCBool Bool
+  | BCString String
+  | BCProto Int
+
+type BProto = BPr String Int Int (List (Bool * Int)) (List BConst) (List String) (List BInstr)
+
+type BProgram = BProg (List (String * Int * Int)) (List BProto) Int
+
+let bop_name op =
+  match op with
+  | OpConst -> "CONST"
+  | OpPop -> "POP"
+  | OpDup -> "DUP"
+  | OpGetLocal -> "GET_LOCAL"
+  | OpSetLocal -> "SET_LOCAL"
+  | OpGetUpvalue -> "GET_UPVALUE"
+  | OpSetUpvalue -> "SET_UPVALUE"
+  | OpCloseUpvalue -> "CLOSE_UPVALUE"
+  | OpGetGlobal -> "GET_GLOBAL"
+  | OpDefGlobal -> "DEF_GLOBAL"
+  | OpNegInt -> "NEG_INT"
+  | OpNegFloat -> "NEG_FLOAT"
+  | OpBitNot -> "BIT_NOT"
+  | OpLogicalNot -> "LOGICAL_NOT"
+  | OpAddInt -> "ADD_INT"
+  | OpSubInt -> "SUB_INT"
+  | OpMulInt -> "MUL_INT"
+  | OpDivInt -> "DIV_INT"
+  | OpModInt -> "MOD_INT"
+  | OpAddFloat -> "ADD_FLOAT"
+  | OpSubFloat -> "SUB_FLOAT"
+  | OpMulFloat -> "MUL_FLOAT"
+  | OpDivFloat -> "DIV_FLOAT"
+  | OpBitAnd -> "BIT_AND"
+  | OpBitOr -> "BIT_OR"
+  | OpBitXor -> "BIT_XOR"
+  | OpShl -> "SHL"
+  | OpShr -> "SHR"
+  | OpConcatStr -> "CONCAT_STR"
+  | OpCons -> "CONS"
+  | OpEq -> "EQ"
+  | OpNeq -> "NEQ"
+  | OpLt -> "LT"
+  | OpLe -> "LE"
+  | OpGt -> "GT"
+  | OpGe -> "GE"
+  | OpMakeTuple -> "MAKE_TUPLE"
+  | OpMakeList -> "MAKE_LIST"
+  | OpMakeAdt -> "MAKE_ADT"
+  | OpMakeStruct -> "MAKE_STRUCT"
+  | OpGetField -> "GET_FIELD"
+  | OpSetField -> "SET_FIELD"
+  | OpNewHeap -> "NEW_HEAP"
+  | OpCloseHeap -> "CLOSE_HEAP"
+  | OpDerefPtr -> "DEREF_PTR"
+  | OpSetDeref -> "SET_DEREF"
+  | OpGetPtrField -> "GET_PTR_FIELD"
+  | OpSetPtrField -> "SET_PTR_FIELD"
+  | OpAddrOfLocal -> "ADDR_OF_LOCAL"
+  | OpAddrOfGlobal -> "ADDR_OF_GLOBAL"
+  | OpMakeClosure -> "MAKE_CLOSURE"
+  | OpJump -> "JUMP"
+  | OpJumpIfFalse -> "JUMP_IF_FALSE"
+  | OpJumpIfTrue -> "JUMP_IF_TRUE"
+  | OpCall -> "CALL"
+  | OpTailCall -> "TAIL_CALL"
+  | OpReturn -> "RETURN"
+  | OpMatchBool -> "MATCH_BOOL"
+  | OpMatchInt -> "MATCH_INT"
+  | OpMatchFloat -> "MATCH_FLOAT"
+  | OpMatchString -> "MATCH_STRING"
+  | OpMatchUnit -> "MATCH_UNIT"
+  | OpMatchTuple -> "MATCH_TUPLE"
+  | OpMatchListLen -> "MATCH_LIST_LEN"
+  | OpMatchCons -> "MATCH_CONS"
+  | OpMatchAdt -> "MATCH_ADT"
+  | OpTupleGet -> "TUPLE_GET"
+  | OpListGet -> "LIST_GET"
+  | OpListTail -> "LIST_TAIL"
+  | OpAdtField -> "ADT_FIELD"
+  | OpMatchFail -> "MATCH_FAIL"
+
+let len_str s = to_string (str_len s) ++ ":" ++ s ++ "\n"
+
+let serialize_bprogram prog =
+  match prog with
+  | BProg ctors protos entry_id ->
+      let ctor_lines =
+        core.list_map (fn c ->
+          match c with
+          | (nm, tag, ar) -> "CTOR " ++ nm ++ " " ++ to_string tag ++ " " ++ to_string ar ++ "\n"
+        ) ctors
+      in
+      let proto_lines =
+        let n = list_len protos in
+        let rec go id acc =
+          if id >= n then list_rev acc
+          else
+            match list_nth protos id with
+            | BPr name arity num_loc upvals consts names code ->
+                let hdr = "PROTO " ++ to_string id ++ " " ++ to_string arity ++ " " ++ to_string num_loc ++ " " ++ len_str name in
+                let uv_lines =
+                  core.list_map (fn uv ->
+                    match uv with
+                    | (is_l, idx) -> "UPVAL " ++ (if is_l then "1" else "0") ++ " " ++ to_string idx ++ "\n"
+                  ) upvals
+                in
+                let c_lines =
+                  core.list_map (fn c ->
+                    match c with
+                    | BCUnit -> "CONST U\n"
+                    | BCInt x -> "CONST I " ++ to_string x ++ "\n"
+                    | BCFloat f -> "CONST F " ++ to_string f ++ "\n"
+                    | BCBool b -> "CONST B " ++ (if b then "1" else "0") ++ "\n"
+                    | BCString s -> "CONST S " ++ len_str s
+                    | BCProto pid -> "CONST P " ++ to_string pid ++ "\n"
+                  ) consts
+                in
+                let n_lines = core.list_map (fn nm -> "NAME " ++ len_str nm) names in
+                let ins_lines =
+                  core.list_map (fn ins ->
+                    match ins with
+                    | BIns op a1 a2 -> "CODE " ++ bop_name op ++ " " ++ to_string a1 ++ " " ++ to_string a2 ++ "\n"
+                  ) code
+                in
+                let chunk_str =
+                  str_concat_list (
+                    list_append [hdr]
+                      (list_append uv_lines
+                        (list_append c_lines
+                          (list_append n_lines
+                            (list_append ins_lines ["ENDPROTO\n"]))))
+                  )
+                in
+                go (id + 1) (chunk_str :: acc)
+        in
+        go 0 []
+      in
+      str_concat_list (
+        list_append ["CMLBC 1\n"]
+          (list_append ctor_lines
+            (list_append proto_lines ["ENTRY " ++ to_string entry_id ++ "\n"]))
+      )

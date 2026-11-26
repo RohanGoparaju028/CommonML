@@ -1,0 +1,23 @@
+-- CommonML Socket Networking Library
+let core = import "std/core"
+
+let tcp_serve_once host port handler =
+  let srv = tcp_listen host port
+  let client = tcp_accept srv
+  handler client
+  sock_close client
+  sock_close srv
+
+let tcp_serve host port handler =
+  let srv = tcp_listen host port
+  while true
+    let client = tcp_accept srv
+    handler client
+    sock_close client
+
+let tcp_request_once host port payload max_bytes =
+  let fd = tcp_connect host port
+  let _ = sock_send fd payload
+  let resp = sock_recv_all fd max_bytes
+  sock_close fd
+  resp

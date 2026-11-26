@@ -1,4 +1,5 @@
 #include "cml/repl.hpp"
+#include "cml/highlight.hpp"
 
 #include <sstream>
 #include <string>
@@ -25,7 +26,18 @@ bool Repl::handle_command(const std::string& line, std::ostream& out, std::ostre
             << "  :type <expr>     Show inferred type without executing\n"
             << "  :ast             Toggle AST dump\n"
             << "  :bc              Toggle bytecode dump\n"
+            << "  :highlight       Toggle syntax-highlighted input echo (or :highlight <code>)\n"
             << "  :reset           Reset REPL state\n";
+        return true;
+    }
+    if (line == ":highlight" || line == ":hl") {
+        highlight_mode_ = !highlight_mode_;
+        out << "Syntax highlighting: " << (highlight_mode_ ? "on" : "off") << "\n";
+        return true;
+    }
+    if (line.rfind(":highlight ", 0) == 0) {
+        std::string snippet = line.substr(11);
+        out << highlight_source("<repl>", snippet, true) << "\n";
         return true;
     }
     if (line == ":ast") {
@@ -89,6 +101,9 @@ int Repl::run(std::istream& in, std::ostream& out, std::ostream& err) {
         }
 
         std::string filename = "<repl:" + std::to_string(eval_counter_++) + ">";
+        if (highlight_mode_) {
+            out << highlight_source(filename, buffer, true) << "\n";
+        }
         try {
             EvalResult res = pipeline_.eval_source(filename, buffer, opts_);
             if (!res.debug_output.empty()) {

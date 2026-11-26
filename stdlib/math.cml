@@ -1,0 +1,266 @@
+-- CommonML Standard Math Library (pure compiled CommonML numerics)
+let core = import "std/core"
+
+let pi = 3.14159265358979323846
+let tau = 6.28318530717958647692
+let half_pi = 1.57079632679489661923
+let e = 2.71828182845904523536
+let ln2 = 0.69314718055994530942
+let ln10 = 2.30258509299404568402
+
+let fabs x = if x < 0.0 then -.x else x
+
+let min_int a b = if a < b then a else b
+let max_int a b = if a > b then a else b
+let min_float a b = if a < b then a else b
+let max_float a b = if a > b then a else b
+
+let is_nan x = x != x
+let is_inf x = fabs x > 1.7976931348623157e308
+
+let floor x =
+  if is_nan x || is_inf x || fabs x >= 4503599627370496.0 then x
+  else
+    let i = float_of_int (int_of_float x)
+    if x < 0.0 && i != x then i -. 1.0 else i
+
+let ceil x = -. (floor (-. x))
+
+let round x =
+  if x >= 0.0 then floor (x +. 0.5) else ceil (x -. 0.5)
+
+let fmod a b =
+  if b == 0.0 then panic "fmod by zero"
+  else
+    let q = float_of_int (int_of_float (a /. b))
+    a -. q *. b
+
+let pow_int base exp_v =
+  if exp_v < 0 then panic "pow_int exponent must be non-negative"
+  else
+    var res = 1
+    var b = base
+    var n = exp_v
+    while n > 0
+      if n % 2 == 1
+        res = res * b
+      n = n / 2
+      if n > 0
+        b = b * b
+    res
+
+let pow_float_int base exp_v =
+  var n = if exp_v < 0 then -exp_v else exp_v
+  var b = base
+  var acc = 1.0
+  while n > 0
+    if n % 2 == 1
+      acc = acc *. b
+    n = n / 2
+    if n > 0
+      b = b *. b
+  if exp_v < 0 then 1.0 /. acc else acc
+
+let sqrt x =
+  if x < 0.0 then panic "sqrt of negative number"
+  else if x == 0.0 || is_nan x || is_inf x then x
+  else
+    var m = x
+    var factor = 1.0
+    while m > 2.0
+      m = m /. 4.0
+      factor = factor *. 2.0
+    while m < 0.5
+      m = m *. 4.0
+      factor = factor *. 0.5
+    var g = 1.0
+    for (var i = 0; i < 12; i = i + 1)
+      g = 0.5 *. (g +. m /. g)
+    g *. factor
+
+let exp x =
+  if is_nan x then x
+  else if x > 709.78 then 1.0e308 *. 10.0
+  else if x < -.745.0 then 0.0
+  else
+    let k = int_of_float (round (x /. ln2))
+    let r = x -. float_of_int k *. ln2
+    var term = 1.0
+    var acc = 1.0
+    for (var i = 1; i <= 20; i = i + 1)
+      term = term *. r /. float_of_int i
+      acc = acc +. term
+    acc *. pow_float_int 2.0 k
+
+let log x =
+  if x < 0.0 then panic "log of negative number"
+  else if x == 0.0 then panic "log of zero"
+  else if is_nan x || is_inf x then x
+  else
+    let sqrt2 = 1.4142135623730951
+    let inv_sqrt2 = 0.7071067811865475
+    var m = x
+    var k = 0
+    while m > sqrt2
+      m = m *. 0.5
+      k = k + 1
+    while m < inv_sqrt2
+      m = m *. 2.0
+      k = k - 1
+    let u = (m -. 1.0) /. (m +. 1.0)
+    let u2 = u *. u
+    var term = u
+    var acc = u
+    for (var i = 3; i <= 29; i = i + 2)
+      term = term *. u2
+      acc = acc +. term /. float_of_int i
+    2.0 *. acc +. float_of_int k *. ln2
+
+let log10 x = log x /. ln10
+
+let pow base exp_v =
+  if exp_v == 0.0 then 1.0
+  else if base == 0.0 then
+    if exp_v > 0.0 then 0.0 else panic "pow: 0.0 raised to negative power"
+  else if fabs exp_v < 2147483647.0 && float_of_int (int_of_float exp_v) == exp_v then
+    pow_float_int base (int_of_float exp_v)
+  else
+    exp (exp_v *. log base)
+
+let wrap_angle x =
+  let y = x -. floor (x /. tau) *. tau
+  if y > pi then y -. tau else y
+
+let sin x =
+  let a = wrap_angle x
+  let b =
+    if a > half_pi then pi -. a
+    else if a < -.half_pi then -.pi -. a
+    else a
+  let b2 = b *. b
+  var term = b
+  var acc = b
+  for (var i = 3; i <= 17; i = i + 2)
+    let denom = float_of_int ((i - 1) * i)
+    term = -.term *. b2 /. denom
+    acc = acc +. term
+  acc
+
+let cos x = sin (x +. half_pi)
+
+let tan x =
+  let c = cos x
+  if fabs c < 1.0e-15 then panic "tan undefined at pi/2 + k*pi"
+  else sin x /. c
+
+let atan x =
+  let sign = if x < 0.0 then -.1.0 else 1.0
+  let ax = fabs x
+  let inv = ax > 1.0
+  let v = if inv then 1.0 /. ax else ax
+  let sqrt3 = 1.7320508075688772
+  let tan_pi12 = 0.2679491924311227
+  let hi = v > tan_pi12
+  let u = if hi then (v *. sqrt3 -. 1.0) /. (v +. sqrt3) else v
+  let u2 = u *. u
+  var term = u
+  var acc = u
+  for (var i = 3; i <= 23; i = i + 2)
+    term = -.term *. u2
+    acc = acc +. term /. float_of_int i
+  let folded = if hi then pi /. 6.0 +. acc else acc
+  let res = if inv then half_pi -. folded else folded
+  sign *. res
+
+let atan2 y x =
+  if x > 0.0 then atan (y /. x)
+  else if x < 0.0 && y >= 0.0 then atan (y /. x) +. pi
+  else if x < 0.0 && y < 0.0 then atan (y /. x) -. pi
+  else if x == 0.0 && y > 0.0 then half_pi
+  else if x == 0.0 && y < 0.0 then -.half_pi
+  else 0.0
+
+let asin x =
+  if x < -.1.0 || x > 1.0 then panic "asin domain error"
+  else atan2 x (sqrt (1.0 -. x *. x))
+
+let acos x =
+  if x < -.1.0 || x > 1.0 then panic "acos domain error"
+  else atan2 (sqrt (1.0 -. x *. x)) x
+
+let deg_to_rad deg = deg *. pi /. 180.0
+let rad_to_deg rad = rad *. 180.0 /. pi
+
+let clamp_int lo hi x =
+  if x < lo then lo else if x > hi then hi else x
+
+let clamp_float lo hi x =
+  if x < lo then lo else if x > hi then hi else x
+
+let lerp a b t = a +. (b -. a) *. t
+
+let gcd a b =
+  var x = abs a
+  var y = abs b
+  while y != 0
+    let t = x % y
+    x = y
+    y = t
+  x
+
+let lcm a b =
+  if a == 0 || b == 0 then 0
+  else abs ((a / gcd a b) * b)
+
+let factorial n =
+  var acc = 1
+  for (var i = 2; i <= n; i = i + 1)
+    acc = acc * i
+  acc
+
+let fib_iter n =
+  var a = 0
+  var b = 1
+  for (var i = 0; i < n; i = i + 1)
+    let next = a + b
+    a = b
+    b = next
+  a
+
+let is_prime n =
+  if n < 2 then false
+  else
+    var ok = true
+    var d = 2
+    while d * d <= n
+      if n % d == 0
+        ok = false
+        break
+      d = d + 1
+    ok
+
+let sum_int xs = core.list_foldl (fn acc x -> acc + x) 0 xs
+let sum_float xs = core.list_foldl (fn acc x -> acc +. x) 0.0 xs
+
+let mean_float xs =
+  let n = list_len xs
+  if n == 0 then 0.0 else sum_float xs /. float_of_int n
+
+let variance_float xs =
+  let n = list_len xs
+  if n == 0 then 0.0
+  else
+    let m = mean_float xs
+    let sq = core.list_foldl (fn acc x -> let d = x -. m in acc +. d *. d) 0.0 xs
+    sq /. float_of_int n
+
+let stddev_float xs = sqrt (variance_float xs)
+
+let dot_product xs ys =
+  let n = min_int (list_len xs) (list_len ys)
+  var acc = 0.0
+  for (var i = 0; i < n; i = i + 1)
+    acc = acc +. list_nth xs i *. list_nth ys i
+  acc
+
+let vec_norm xs = sqrt (dot_product xs xs)

@@ -1,4 +1,4 @@
-# CommonML Compiler 
+# CommonML Compiler
 
 CommonML (`cml`) is a statically typed, Hindley-Milner functional programming language implemented in C++20 with algebraic data types, pattern matching, hygienic AST macros (`quote` / `$`), a bytecode compiler, a stack-based VM with closures and tail-call optimization, and an interactive REPL.
 
@@ -9,7 +9,9 @@ CommonML (`cml`) is a statically typed, Hindley-Milner functional programming la
 - **First-Class Curried Functions**: Closures with lexical upvalues, `let rec` recursion, pipe-forward (`|>`), and tail-call optimization (`TailCall`).
 - **Hygienic Macros**: Compile-time `macro` definitions using `quote { ... }` and `$` / `$(...)` splicing, backed by Flatt-style sets-of-scopes (`ScopeId`) hygiene to prevent variable capture.
 - **Bytecode Compiler & Stack VM**: Compiles expanded, typechecked ASTs to a compact bytecode instruction set with a disassembler (`--bc` / `:bc`).
-- **CLI & Interactive REPL**: Run `.cml` scripts, evaluate inline expressions (`-e`), inspect tokens/AST/types/bytecode, or explore interactively in the REPL.
+- **CLI, Package Manager (`build.cml`) & Interactive REPL**: Run `.cml` scripts (`cml run`), compile standalone bytecode executables (`cml build` / `cmlc`), syntax-highlight code (`--highlight` / `:highlight` plus TextMate grammar in `editors/vscode/`), scaffold `lib` / `console` / `web` projects with Zig-style `build.cml` scripts (`new`, `init`, `add`, `install`, `build`, `run`, `test`, `pkg list`), or explore interactively in the REPL.
+- **Reference-Counted Memory, Indentation Blocks, Loops & Collections**: Intrusive reference counting (`rc_count`, `rc_live_objects`), indentation-based blocks for functions and control flow, `struct` declarations and dot-access (`p.x`), assignment imports (`let math = import "std/math"`), `var` mutable bindings, `while` / C-style `for` / `for each` loops (`break`, `continue`), `Vector`/`Dict`/`Set` collections, and file/socket I/O.
+- **Standard Library & Bootstrap Compiler**: Includes `std/core`, `std/math`, `std/console`, `std/net` (TCP sockets), and `std/http` (HTTP/1.1 server/client), plus a self-hosted bootstrap CommonML compiler/interpreter in `bootstrap/`.
 
 ## Building & Testing
 
@@ -22,6 +24,26 @@ ctest --test-dir build --output-on-failure
 ```
 
 ## Quick Start
+
+### Compile & Run (`cml` / `cmlc`)
+
+```sh
+# Like `go run`
+./build/cml run hello.cml
+./build/cml run hello.cml arg1 arg2
+
+# Like `go build` (or `cmlc hello.cml`) -> generates ./hello
+./build/cml build hello.cml
+./hello
+```
+
+Or install globally (`cml`, `commonml`, `cmlc`, `stdlib/`) and run without paths:
+
+```sh
+cmake --build build -j
+sudo cmake --install build
+cml run hello.cml
+```
 
 ### Evaluate Inline Code
 
@@ -76,6 +98,34 @@ with_temp!(5, x)
 ```
 
 REPL commands include `:type <expr>`, `:ast`, `:bc`, `:reset`, `:help`, and `:quit`.
+
+### Package Manager (`build.cml`) & Project Templates
+
+Create libraries, console apps, or HTTP web applications with Zig-style `build.cml` configuration scripts:
+
+```sh
+./build/cml new lib my_lib
+./build/cml new console my_cli
+./build/cml new web my_web
+
+cd my_cli
+../build/cml add my_lib --path ../my_lib
+../build/cml build
+../build/cml test
+../build/cml run -- arg1 arg2
+```
+
+### Self-Hosted Bootstrap Compiler
+
+Compile and run CommonML programs using the self-hosted lexer, parser, Hindley-Milner typechecker, and bytecode compiler written in CommonML (targeting the CommonML stack VM via `.cmlbc` bytecode):
+
+```sh
+./build/commonml bootstrap/main.cml
+./build/commonml bootstrap/main.cml -- -e 'let rec fact n = if n <= 1 then 1 else n * fact (n - 1)
+fact 6'
+./build/commonml bootstrap/main.cml -- -c app.cml -o app.cmlbc
+./build/commonml app.cmlbc
+```
 
 ## Project Layout
 

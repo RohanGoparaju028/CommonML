@@ -37,6 +37,10 @@ const char* unary_op_str(UnaryOp op) {
     switch (op) {
         case UnaryOp::NegInt: return "-";
         case UnaryOp::NegFloat: return "-.";
+        case UnaryOp::BitNot: return "~";
+        case UnaryOp::LogicalNot: return "!";
+        case UnaryOp::Deref: return "*";
+        case UnaryOp::AddrOf: return "&";
     }
     return "-";
 }
@@ -52,6 +56,11 @@ const char* binary_op_str(BinaryOp op) {
         case BinaryOp::SubFloat: return "-.";
         case BinaryOp::MulFloat: return "*.";
         case BinaryOp::DivFloat: return "/.";
+        case BinaryOp::BitAnd: return "&";
+        case BinaryOp::BitOr: return "|";
+        case BinaryOp::BitXor: return "^";
+        case BinaryOp::Shl: return "<<";
+        case BinaryOp::Shr: return ">>";
         case BinaryOp::ConcatStr: return "++";
         case BinaryOp::Cons: return "::";
         case BinaryOp::Eq: return "==";
@@ -102,6 +111,8 @@ std::string type_expr_to_string(const TypeExprPtr& ty) {
             } else if constexpr (std::is_same_v<T, TFun>) {
                 return "(" + type_expr_to_string(n.param) + " -> " +
                        type_expr_to_string(n.ret) + ")";
+            } else if constexpr (std::is_same_v<T, TPtr>) {
+                return "*" + type_expr_to_string(n.inner);
             } else {
                 std::string s = "(";
                 for (size_t i = 0; i < n.elems.size(); ++i) {
@@ -255,8 +266,57 @@ std::string expr_to_string(const ExprPtr& expr) {
                 return "quote { " + expr_to_string(n.body) + " }";
             } else if constexpr (std::is_same_v<T, ExprUnquote>) {
                 return "$(" + expr_to_string(n.expr) + ")";
-            } else {
+            } else if constexpr (std::is_same_v<T, ExprUnquoteSlot>) {
                 return "$slot" + std::to_string(n.index);
+            } else if constexpr (std::is_same_v<T, ExprImport>) {
+                return "import " + escape_str(n.path);
+            } else if constexpr (std::is_same_v<T, ExprStructLit>) {
+                std::string s = n.type_name.name + " { ";
+                for (size_t i = 0; i < n.fields.size(); ++i) {
+                    if (i > 0) s += ", ";
+                    s += n.fields[i].first.name + " = " + expr_to_string(n.fields[i].second);
+                }
+                return s + " }";
+            } else if constexpr (std::is_same_v<T, ExprFieldGet>) {
+                return expr_to_string(n.obj) + "." + n.field.name;
+            } else if constexpr (std::is_same_v<T, ExprFieldSet>) {
+                return expr_to_string(n.obj) + "." + n.field.name + " = " + expr_to_string(n.value);
+            } else if constexpr (std::is_same_v<T, ExprNew>) {
+                return "(new " + expr_to_string(n.value) + ")";
+            } else if constexpr (std::is_same_v<T, ExprClose>) {
+                return "(close " + expr_to_string(n.ptr) + ")";
+            } else if constexpr (std::is_same_v<T, ExprDefer>) {
+                return "(defer " + expr_to_string(n.action) + ")";
+            } else if constexpr (std::is_same_v<T, ExprDerefSet>) {
+                return "(*" + expr_to_string(n.ptr) + " = " + expr_to_string(n.value) + ")";
+            } else if constexpr (std::is_same_v<T, ExprPtrFieldGet>) {
+                return expr_to_string(n.ptr) + "->" + n.field.name;
+            } else if constexpr (std::is_same_v<T, ExprPtrFieldSet>) {
+                return expr_to_string(n.ptr) + "->" + n.field.name + " = " + expr_to_string(n.value);
+            } else if constexpr (std::is_same_v<T, ExprAssign>) {
+                return n.target.name + " = " + expr_to_string(n.value);
+            } else if constexpr (std::is_same_v<T, ExprBlock>) {
+                std::string s = "begin ";
+                for (size_t i = 0; i < n.stmts.size(); ++i) {
+                    if (i > 0) s += "; ";
+                    s += stmt_to_string(n.stmts[i]);
+                }
+                return s + " end";
+            } else if constexpr (std::is_same_v<T, ExprWhile>) {
+                return "while " + expr_to_string(n.cond) + " " + expr_to_string(n.body);
+            } else if constexpr (std::is_same_v<T, ExprFor>) {
+                std::string s = "for (";
+                if (n.init) s += stmt_to_string(*n.init);
+                s += "; " + expr_to_string(n.cond) + "; ";
+                if (n.step) s += expr_to_string(*n.step);
+                return s + ") " + expr_to_string(n.body);
+            } else if constexpr (std::is_same_v<T, ExprForEach>) {
+                return "for each " + pattern_to_string(n.pat) + " in " +
+                       expr_to_string(n.iterable) + " " + expr_to_string(n.body);
+            } else if constexpr (std::is_same_v<T, ExprBreak>) {
+                return "break";
+            } else {
+                return "continue";
             }
         },
         expr->node);
@@ -278,9 +338,23 @@ std::string stmt_to_string(const StmtPtr& stmt) {
                     }
                 }
                 return s;
+            } else if constexpr (std::is_same_v<T, StmtStructDecl>) {
+                std::string s = "struct " + n.name.name;
+                for (const auto& tp : n.type_params) s += " " + tp.name;
+                s += " { ";
+                for (size_t i = 0; i < n.fields.size(); ++i) {
+                    if (i > 0) s += ", ";
+                    s += n.fields[i].name.name + " : " + type_expr_to_string(n.fields[i].type);
+                }
+                return s + " }";
             } else if constexpr (std::is_same_v<T, StmtLet>) {
                 std::string s = n.is_rec ? "let rec " : "let ";
                 s += pattern_to_string(n.pat);
+                if (n.type_ann) s += " : " + type_expr_to_string(*n.type_ann);
+                s += " = " + expr_to_string(n.value);
+                return s;
+            } else if constexpr (std::is_same_v<T, StmtVar>) {
+                std::string s = "var " + n.name.name;
                 if (n.type_ann) s += " : " + type_expr_to_string(*n.type_ann);
                 s += " = " + expr_to_string(n.value);
                 return s;
@@ -289,6 +363,8 @@ std::string stmt_to_string(const StmtPtr& stmt) {
                 for (const auto& p : n.params) s += " " + p.name;
                 s += " = " + expr_to_string(n.body);
                 return s;
+            } else if constexpr (std::is_same_v<T, StmtImport>) {
+                return "import " + escape_str(n.path);
             } else {
                 return expr_to_string(n.expr);
             }
@@ -348,7 +424,9 @@ static ExprPtr map_scopes_expr(const ExprPtr& expr, Fn&& ident_fn, bool enter_un
             using T = std::decay_t<decltype(n)>;
             if constexpr (std::is_same_v<T, ExprInt> || std::is_same_v<T, ExprFloat> ||
                           std::is_same_v<T, ExprBool> || std::is_same_v<T, ExprString> ||
-                          std::is_same_v<T, ExprUnit> || std::is_same_v<T, ExprUnquoteSlot>) {
+                          std::is_same_v<T, ExprUnit> || std::is_same_v<T, ExprUnquoteSlot> ||
+                          std::is_same_v<T, ExprImport> || std::is_same_v<T, ExprBreak> ||
+                          std::is_same_v<T, ExprContinue>) {
                 return expr;
             } else if constexpr (std::is_same_v<T, ExprVar>) {
                 return std::make_shared<Expr>(Expr{ExprVar{ident_fn(n.ident)}, expr->span});
@@ -423,12 +501,114 @@ static ExprPtr map_scopes_expr(const ExprPtr& expr, Fn&& ident_fn, bool enter_un
             } else if constexpr (std::is_same_v<T, ExprQuote>) {
                 return std::make_shared<Expr>(
                     Expr{ExprQuote{map_scopes_expr(n.body, ident_fn, enter_unquote)}, expr->span});
-            } else {
-                // ExprUnquote
+            } else if constexpr (std::is_same_v<T, ExprUnquote>) {
                 if (!enter_unquote) return expr;
                 return std::make_shared<Expr>(
                     Expr{ExprUnquote{map_scopes_expr(n.expr, ident_fn, enter_unquote)},
                          expr->span});
+            } else if constexpr (std::is_same_v<T, ExprStructLit>) {
+                std::vector<std::pair<Ident, ExprPtr>> fs;
+                fs.reserve(n.fields.size());
+                for (const auto& [fn, fv] : n.fields) {
+                    fs.emplace_back(fn, map_scopes_expr(fv, ident_fn, enter_unquote));
+                }
+                return std::make_shared<Expr>(
+                    Expr{ExprStructLit{n.type_name, std::move(fs)}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprFieldGet>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprFieldGet{map_scopes_expr(n.obj, ident_fn, enter_unquote), n.field},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprFieldSet>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprFieldSet{map_scopes_expr(n.obj, ident_fn, enter_unquote), n.field,
+                                      map_scopes_expr(n.value, ident_fn, enter_unquote)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprNew>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprNew{map_scopes_expr(n.value, ident_fn, enter_unquote)}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprClose>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprClose{map_scopes_expr(n.ptr, ident_fn, enter_unquote)}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprDefer>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprDefer{map_scopes_expr(n.action, ident_fn, enter_unquote)}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprDerefSet>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprDerefSet{map_scopes_expr(n.ptr, ident_fn, enter_unquote),
+                                      map_scopes_expr(n.value, ident_fn, enter_unquote)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprPtrFieldGet>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprPtrFieldGet{map_scopes_expr(n.ptr, ident_fn, enter_unquote), n.field},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprPtrFieldSet>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprPtrFieldSet{map_scopes_expr(n.ptr, ident_fn, enter_unquote), n.field,
+                                         map_scopes_expr(n.value, ident_fn, enter_unquote)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprAssign>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprAssign{ident_fn(n.target),
+                                    map_scopes_expr(n.value, ident_fn, enter_unquote)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprWhile>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprWhile{map_scopes_expr(n.cond, ident_fn, enter_unquote),
+                                   map_scopes_expr(n.body, ident_fn, enter_unquote)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprForEach>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprForEach{map_scopes_pat(n.pat, ident_fn, enter_unquote),
+                                     map_scopes_expr(n.iterable, ident_fn, enter_unquote),
+                                     map_scopes_expr(n.body, ident_fn, enter_unquote)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprFor>) {
+                std::optional<StmtPtr> init_s;
+                if (n.init) {
+                    const StmtPtr& s = *n.init;
+                    if (auto* vs = std::get_if<StmtVar>(&s->node)) {
+                        init_s = std::make_shared<Stmt>(
+                            Stmt{StmtVar{ident_fn(vs->name), vs->type_ann,
+                                         map_scopes_expr(vs->value, ident_fn, enter_unquote)},
+                                 s->span});
+                    } else if (auto* es = std::get_if<StmtExpr>(&s->node)) {
+                        init_s = std::make_shared<Stmt>(
+                            Stmt{StmtExpr{map_scopes_expr(es->expr, ident_fn, enter_unquote)},
+                                 s->span});
+                    }
+                }
+                std::optional<ExprPtr> step_e;
+                if (n.step) step_e = map_scopes_expr(*n.step, ident_fn, enter_unquote);
+                return std::make_shared<Expr>(
+                    Expr{ExprFor{init_s, map_scopes_expr(n.cond, ident_fn, enter_unquote), step_e,
+                                 map_scopes_expr(n.body, ident_fn, enter_unquote)},
+                         expr->span});
+            } else {
+                // ExprBlock
+                const auto& blk = std::get<ExprBlock>(expr->node);
+                std::vector<StmtPtr> out_s;
+                for (const auto& s : blk.stmts) {
+                    if (auto* ls = std::get_if<StmtLet>(&s->node)) {
+                        out_s.push_back(std::make_shared<Stmt>(
+                            Stmt{StmtLet{ls->is_rec,
+                                         map_scopes_pat(ls->pat, ident_fn, enter_unquote),
+                                         ls->type_ann,
+                                         map_scopes_expr(ls->value, ident_fn, enter_unquote)},
+                                 s->span}));
+                    } else if (auto* vs = std::get_if<StmtVar>(&s->node)) {
+                        out_s.push_back(std::make_shared<Stmt>(
+                            Stmt{StmtVar{ident_fn(vs->name), vs->type_ann,
+                                         map_scopes_expr(vs->value, ident_fn, enter_unquote)},
+                                 s->span}));
+                    } else if (auto* es = std::get_if<StmtExpr>(&s->node)) {
+                        out_s.push_back(std::make_shared<Stmt>(
+                            Stmt{StmtExpr{map_scopes_expr(es->expr, ident_fn, enter_unquote)},
+                                 s->span}));
+                    } else {
+                        out_s.push_back(s);
+                    }
+                }
+                return std::make_shared<Expr>(Expr{ExprBlock{std::move(out_s)}, expr->span});
             }
         },
         expr->node);

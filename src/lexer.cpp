@@ -9,12 +9,16 @@ namespace cml {
 const char* token_kind_name(TokenKind kind) {
     switch (kind) {
         case TokenKind::Eof: return "end of file";
+        case TokenKind::Newline: return "newline";
+        case TokenKind::Indent: return "indent";
+        case TokenKind::Dedent: return "dedent";
         case TokenKind::Int: return "integer";
         case TokenKind::Float: return "float";
         case TokenKind::String: return "string";
         case TokenKind::LowerIdent: return "identifier";
         case TokenKind::UpperIdent: return "constructor/type name";
         case TokenKind::KwLet: return "'let'";
+        case TokenKind::KwVar: return "'var'";
         case TokenKind::KwRec: return "'rec'";
         case TokenKind::KwIn: return "'in'";
         case TokenKind::KwFn: return "'fn'";
@@ -24,8 +28,18 @@ const char* token_kind_name(TokenKind kind) {
         case TokenKind::KwMatch: return "'match'";
         case TokenKind::KwWith: return "'with'";
         case TokenKind::KwType: return "'type'";
+        case TokenKind::KwStruct: return "'struct'";
         case TokenKind::KwMacro: return "'macro'";
         case TokenKind::KwQuote: return "'quote'";
+        case TokenKind::KwImport: return "'import'";
+        case TokenKind::KwNew: return "'new'";
+        case TokenKind::KwDefer: return "'defer'";
+        case TokenKind::KwClose: return "'close'";
+        case TokenKind::KwWhile: return "'while'";
+        case TokenKind::KwFor: return "'for'";
+        case TokenKind::KwEach: return "'each'";
+        case TokenKind::KwBreak: return "'break'";
+        case TokenKind::KwContinue: return "'continue'";
         case TokenKind::KwTrue: return "'true'";
         case TokenKind::KwFalse: return "'false'";
         case TokenKind::KwBegin: return "'begin'";
@@ -46,6 +60,9 @@ const char* token_kind_name(TokenKind kind) {
         case TokenKind::Dot: return "'.'";
         case TokenKind::Dollar: return "'$'";
         case TokenKind::Bang: return "'!'";
+        case TokenKind::Amp: return "'&'";
+        case TokenKind::Caret: return "'^'";
+        case TokenKind::Tilde: return "'~'";
         case TokenKind::Underscore: return "'_'";
         case TokenKind::Eq: return "'='";
         case TokenKind::EqEq: return "'=='";
@@ -54,6 +71,8 @@ const char* token_kind_name(TokenKind kind) {
         case TokenKind::LtEq: return "'<='";
         case TokenKind::Gt: return "'>'";
         case TokenKind::GtEq: return "'>='";
+        case TokenKind::LtLt: return "'<<'";
+        case TokenKind::GtGt: return "'>>'";
         case TokenKind::Plus: return "'+'";
         case TokenKind::Minus: return "'-'";
         case TokenKind::Star: return "'*'";
@@ -101,10 +120,10 @@ void Lexer::error(const std::string& msg, size_t offset, size_t line, size_t col
                                   SourceSpan{source_.filename(), line, col, len, offset}});
 }
 
-void Lexer::skip_whitespace_and_comments() {
+void Lexer::skip_horizontal_and_comments() {
     while (!at_end()) {
         char c = peek();
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+        if (c == ' ' || c == '\t' || c == '\r') {
             advance();
             continue;
         }
@@ -155,16 +174,115 @@ void Lexer::skip_whitespace_and_comments() {
     }
 }
 
+void Lexer::skip_whitespace_and_comments() {
+    while (!at_end()) {
+        skip_horizontal_and_comments();
+        if (peek() == '\n') {
+            advance();
+            continue;
+        }
+        break;
+    }
+}
+
 std::vector<Token> Lexer::tokenize() {
     std::vector<Token> tokens;
+    paren_depth_ = 0;
+    at_line_start_ = true;
+    indent_stack_.clear();
+
     while (true) {
-        skip_whitespace_and_comments();
-        if (at_end()) {
-            tokens.push_back(Token{TokenKind::Eof, "", 0, 0.0, "",
-                                   SourceSpan{source_.filename(), line_, col_, 1, pos_}});
-            break;
+        if (paren_depth_ > 0) {
+            skip_whitespace_and_comments();
+            if (at_end()) {
+                while (indent_stack_.size() > 1) {
+                    indent_stack_.pop_back();
+                    tokens.push_back(Token{TokenKind::Dedent, "", 0, 0.0, "",
+                                           SourceSpan{source_.filename(), line_, col_, 1, pos_}});
+                }
+                tokens.push_back(Token{TokenKind::Eof, "", 0, 0.0, "",
+                                       SourceSpan{source_.filename(), line_, col_, 1, pos_}});
+                break;
+            }
+        } else if (at_line_start_) {
+            size_t line_indent = 0;
+            while (true) {
+                line_indent = 0;
+                while (!at_end() && (peek() == ' ' || peek() == '\t' || peek() == '\r')) {
+                    char c = advance();
+                    if (c == ' ') ++line_indent;
+                    else if (c == '\t') line_indent += 4;
+                }
+                skip_horizontal_and_comments();
+                if (!at_end() && peek() == '\n') {
+                    advance();
+                    continue;
+                }
+                break;
+            }
+
+            if (at_end()) {
+                while (indent_stack_.size() > 1) {
+                    indent_stack_.pop_back();
+                    tokens.push_back(Token{TokenKind::Dedent, "", 0, 0.0, "",
+                                           SourceSpan{source_.filename(), line_, col_, 1, pos_}});
+                }
+                tokens.push_back(Token{TokenKind::Eof, "", 0, 0.0, "",
+                                       SourceSpan{source_.filename(), line_, col_, 1, pos_}});
+                break;
+            }
+
+            if (indent_stack_.empty()) {
+                indent_stack_.push_back(line_indent);
+            } else if (line_indent > indent_stack_.back()) {
+                indent_stack_.push_back(line_indent);
+                tokens.push_back(Token{TokenKind::Indent, "", 0, 0.0, "",
+                                       SourceSpan{source_.filename(), line_, col_, 1, pos_}});
+            } else if (line_indent == indent_stack_.back()) {
+                if (!tokens.empty() && tokens.back().kind != TokenKind::Newline &&
+                    tokens.back().kind != TokenKind::Indent) {
+                    tokens.push_back(Token{TokenKind::Newline, "\n", 0, 0.0, "",
+                                           SourceSpan{source_.filename(), line_, col_, 1, pos_}});
+                }
+            } else {
+                while (indent_stack_.size() > 1 && line_indent < indent_stack_.back()) {
+                    indent_stack_.pop_back();
+                    tokens.push_back(Token{TokenKind::Dedent, "", 0, 0.0, "",
+                                           SourceSpan{source_.filename(), line_, col_, 1, pos_}});
+                }
+                if (line_indent != indent_stack_.back()) {
+                    error("inconsistent indentation", pos_, line_, col_, 1);
+                }
+            }
+            at_line_start_ = false;
+        } else {
+            skip_horizontal_and_comments();
+            if (at_end()) {
+                while (indent_stack_.size() > 1) {
+                    indent_stack_.pop_back();
+                    tokens.push_back(Token{TokenKind::Dedent, "", 0, 0.0, "",
+                                           SourceSpan{source_.filename(), line_, col_, 1, pos_}});
+                }
+                tokens.push_back(Token{TokenKind::Eof, "", 0, 0.0, "",
+                                       SourceSpan{source_.filename(), line_, col_, 1, pos_}});
+                break;
+            }
+            if (peek() == '\n') {
+                advance();
+                at_line_start_ = true;
+                continue;
+            }
         }
-        tokens.push_back(scan_token());
+
+        Token tok = scan_token();
+        if (tok.kind == TokenKind::LParen || tok.kind == TokenKind::LBracket ||
+            tok.kind == TokenKind::LBrace) {
+            ++paren_depth_;
+        } else if (tok.kind == TokenKind::RParen || tok.kind == TokenKind::RBracket ||
+                   tok.kind == TokenKind::RBrace) {
+            if (paren_depth_ > 0) --paren_depth_;
+        }
+        tokens.push_back(std::move(tok));
     }
     return tokens;
 }
@@ -278,6 +396,7 @@ Token Lexer::scan_ident(size_t start_offset, size_t start_line, size_t start_col
 
     static const std::unordered_map<std::string, TokenKind> keywords = {
         {"let", TokenKind::KwLet},
+        {"var", TokenKind::KwVar},
         {"rec", TokenKind::KwRec},
         {"in", TokenKind::KwIn},
         {"fn", TokenKind::KwFn},
@@ -287,8 +406,18 @@ Token Lexer::scan_ident(size_t start_offset, size_t start_line, size_t start_col
         {"match", TokenKind::KwMatch},
         {"with", TokenKind::KwWith},
         {"type", TokenKind::KwType},
+        {"struct", TokenKind::KwStruct},
         {"macro", TokenKind::KwMacro},
         {"quote", TokenKind::KwQuote},
+        {"import", TokenKind::KwImport},
+        {"new", TokenKind::KwNew},
+        {"defer", TokenKind::KwDefer},
+        {"close", TokenKind::KwClose},
+        {"while", TokenKind::KwWhile},
+        {"for", TokenKind::KwFor},
+        {"each", TokenKind::KwEach},
+        {"break", TokenKind::KwBreak},
+        {"continue", TokenKind::KwContinue},
         {"true", TokenKind::KwTrue},
         {"false", TokenKind::KwFalse},
         {"begin", TokenKind::KwBegin},
@@ -337,6 +466,8 @@ Token Lexer::scan_token() {
         case '.': return make(TokenKind::Dot);
         case '$': return make(TokenKind::Dollar);
         case '%': return make(TokenKind::Percent);
+        case '^': return make(TokenKind::Caret);
+        case '~': return make(TokenKind::Tilde);
         case ':':
             if (peek() == ':') { advance(); return make(TokenKind::ColonColon, 2); }
             return make(TokenKind::Colon);
@@ -346,7 +477,7 @@ Token Lexer::scan_token() {
             return make(TokenKind::Pipe);
         case '&':
             if (peek() == '&') { advance(); return make(TokenKind::AmpAmp, 2); }
-            error("unexpected '&' (did you mean '&&'?)", start_off, start_line, start_col);
+            return make(TokenKind::Amp);
         case '=':
             if (peek() == '=') { advance(); return make(TokenKind::EqEq, 2); }
             return make(TokenKind::Eq);
@@ -354,9 +485,11 @@ Token Lexer::scan_token() {
             if (peek() == '=') { advance(); return make(TokenKind::BangEq, 2); }
             return make(TokenKind::Bang);
         case '<':
+            if (peek() == '<') { advance(); return make(TokenKind::LtLt, 2); }
             if (peek() == '=') { advance(); return make(TokenKind::LtEq, 2); }
             return make(TokenKind::Lt);
         case '>':
+            if (peek() == '>') { advance(); return make(TokenKind::GtGt, 2); }
             if (peek() == '=') { advance(); return make(TokenKind::GtEq, 2); }
             return make(TokenKind::Gt);
         case '+':

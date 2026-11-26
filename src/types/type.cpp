@@ -55,6 +55,32 @@ TypePtr list_type(TypePtr elem) {
     return make_tcon("List", {std::move(elem)});
 }
 
+TypePtr vector_type(TypePtr elem) {
+    return make_tcon("Vector", {std::move(elem)});
+}
+
+TypePtr dict_type(TypePtr key, TypePtr val) {
+    return make_tcon("Dict", {std::move(key), std::move(val)});
+}
+
+TypePtr set_type(TypePtr elem) {
+    return make_tcon("Set", {std::move(elem)});
+}
+
+TypePtr ptr_type(TypePtr inner) {
+    return make_tcon("Ptr", {std::move(inner)});
+}
+
+bool is_int_type_name(const std::string& name) {
+    return name == "Int" || name == "i8" || name == "i16" || name == "i32" || name == "i64" ||
+           name == "isize" || name == "u8" || name == "u16" || name == "u32" ||
+           name == "u64" || name == "usize";
+}
+
+bool is_float_type_name(const std::string& name) {
+    return name == "Float" || name == "f32" || name == "f64";
+}
+
 TypePtr apply_subst(const Subst& s, const TypePtr& t) {
     if (!t) return nullptr;
     return std::visit(
@@ -87,12 +113,46 @@ TypePtr apply_subst(const Subst& s, const TypePtr& t) {
         t->node);
 }
 
+static TypePtr apply_subst_skip(const Subst& s, const TypePtr& t,
+                                const std::vector<uint32_t>& skip) {
+    if (!t) return nullptr;
+    return std::visit(
+        [&](const auto& n) -> TypePtr {
+            using T = std::decay_t<decltype(n)>;
+            if constexpr (std::is_same_v<T, TypeVar>) {
+                for (uint32_t q : skip) {
+                    if (q == n.id) return t;
+                }
+                auto it = s.find(n.id);
+                if (it != s.end()) {
+                    return apply_subst(s, it->second);
+                }
+                return t;
+            } else if constexpr (std::is_same_v<T, TypeCon>) {
+                std::vector<TypePtr> args;
+                args.reserve(n.args.size());
+                for (const auto& a : n.args) {
+                    args.push_back(apply_subst_skip(s, a, skip));
+                }
+                return make_tcon(n.name, std::move(args));
+            } else if constexpr (std::is_same_v<T, TypeFun>) {
+                return make_tfun(apply_subst_skip(s, n.param, skip),
+                                 apply_subst_skip(s, n.ret, skip));
+            } else {
+                std::vector<TypePtr> elems;
+                elems.reserve(n.elems.size());
+                for (const auto& e : n.elems) {
+                    elems.push_back(apply_subst_skip(s, e, skip));
+                }
+                return make_ttuple(std::move(elems));
+            }
+        },
+        t->node);
+}
+
 TypeScheme apply_subst_scheme(const Subst& s, const TypeScheme& scheme) {
-    Subst filtered = s;
-    for (uint32_t q : scheme.quantified) {
-        filtered.erase(q);
-    }
-    return TypeScheme{scheme.quantified, apply_subst(filtered, scheme.type)};
+    if (s.empty()) return scheme;
+    return TypeScheme{scheme.quantified, apply_subst_skip(s, scheme.type, scheme.quantified)};
 }
 
 Subst compose_subst(const Subst& outer, const Subst& inner) {
@@ -123,6 +183,41 @@ void collect_free_tvars(const TypePtr& t, std::set<uint32_t>& out) {
             }
         },
         t->node);
+}
+
+static void collect_free_tvars_resolved_impl(const TypePtr& t, const Subst& s,
+                                             const std::vector<uint32_t>& skip,
+                                             std::set<uint32_t>& out) {
+    if (!t) return;
+    std::visit(
+        [&](const auto& n) {
+            using T = std::decay_t<decltype(n)>;
+            if constexpr (std::is_same_v<T, TypeVar>) {
+                for (uint32_t q : skip) {
+                    if (q == n.id) return;
+                }
+                auto it = s.find(n.id);
+                if (it != s.end()) {
+                    static const std::vector<uint32_t> empty_skip;
+                    collect_free_tvars_resolved_impl(it->second, s, empty_skip, out);
+                } else {
+                    out.insert(n.id);
+                }
+            } else if constexpr (std::is_same_v<T, TypeCon>) {
+                for (const auto& a : n.args) collect_free_tvars_resolved_impl(a, s, skip, out);
+            } else if constexpr (std::is_same_v<T, TypeFun>) {
+                collect_free_tvars_resolved_impl(n.param, s, skip, out);
+                collect_free_tvars_resolved_impl(n.ret, s, skip, out);
+            } else {
+                for (const auto& e : n.elems) collect_free_tvars_resolved_impl(e, s, skip, out);
+            }
+        },
+        t->node);
+}
+
+void collect_free_tvars_scheme_resolved(const TypeScheme& scheme, const Subst& s,
+                                        std::set<uint32_t>& out) {
+    collect_free_tvars_resolved_impl(scheme.type, s, scheme.quantified, out);
 }
 
 std::set<uint32_t> free_tvars(const TypePtr& t) {
@@ -163,6 +258,9 @@ static std::string format_type_impl(const TypePtr& t,
             if constexpr (std::is_same_v<T, TypeVar>) {
                 return format_tvar_name(n.id, names);
             } else if constexpr (std::is_same_v<T, TypeCon>) {
+                if (n.name == "Ptr" && n.args.size() == 1) {
+                    return "*" + format_type_impl(n.args[0], names, 3);
+                }
                 if (n.args.empty()) return n.name;
                 std::string s = n.name;
                 for (const auto& a : n.args) {

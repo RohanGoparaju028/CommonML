@@ -20,6 +20,7 @@ private:
     Pipeline pipeline_;
     EvalOptions opts_;
     size_t eval_counter_ = 1;
+    bool highlight_mode_ = false;
 };
 
 }  // namespace cml

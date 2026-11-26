@@ -40,6 +40,9 @@ StmtPtr MacroExpander::expand_stmt(const StmtPtr& stmt) {
                     Stmt{StmtLet{n.is_rec, expand_pattern(n.pat, 0), n.type_ann,
                                  expand_expr(n.value, 0)},
                          stmt->span});
+            } else if constexpr (std::is_same_v<T, StmtVar>) {
+                return std::make_shared<Stmt>(
+                    Stmt{StmtVar{n.name, n.type_ann, expand_expr(n.value, 0)}, stmt->span});
             } else if constexpr (std::is_same_v<T, StmtExpr>) {
                 return std::make_shared<Stmt>(
                     Stmt{StmtExpr{expand_expr(n.expr, 0)}, stmt->span});
@@ -169,6 +172,65 @@ ExprPtr MacroExpander::expand_expr(const ExprPtr& expr, size_t depth) {
             } else if constexpr (std::is_same_v<T, ExprAnnot>) {
                 return std::make_shared<Expr>(
                     Expr{ExprAnnot{expand_expr(n.expr, depth), n.type}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprStructLit>) {
+                std::vector<std::pair<Ident, ExprPtr>> fs;
+                for (const auto& [fn, fv] : n.fields) fs.emplace_back(fn, expand_expr(fv, depth));
+                return std::make_shared<Expr>(
+                    Expr{ExprStructLit{n.type_name, std::move(fs)}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprFieldGet>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprFieldGet{expand_expr(n.obj, depth), n.field}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprFieldSet>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprFieldSet{expand_expr(n.obj, depth), n.field,
+                                      expand_expr(n.value, depth)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprNew>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprNew{expand_expr(n.value, depth)}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprClose>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprClose{expand_expr(n.ptr, depth)}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprDefer>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprDefer{expand_expr(n.action, depth)}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprDerefSet>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprDerefSet{expand_expr(n.ptr, depth), expand_expr(n.value, depth)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprPtrFieldGet>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprPtrFieldGet{expand_expr(n.ptr, depth), n.field}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprPtrFieldSet>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprPtrFieldSet{expand_expr(n.ptr, depth), n.field,
+                                         expand_expr(n.value, depth)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprAssign>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprAssign{n.target, expand_expr(n.value, depth)}, expr->span});
+            } else if constexpr (std::is_same_v<T, ExprWhile>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprWhile{expand_expr(n.cond, depth), expand_expr(n.body, depth)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprForEach>) {
+                return std::make_shared<Expr>(
+                    Expr{ExprForEach{expand_pattern(n.pat, depth), expand_expr(n.iterable, depth),
+                                     expand_expr(n.body, depth)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprFor>) {
+                std::optional<StmtPtr> init_s;
+                if (n.init) init_s = expand_stmt(*n.init);
+                std::optional<ExprPtr> step_e;
+                if (n.step) step_e = expand_expr(*n.step, depth);
+                return std::make_shared<Expr>(
+                    Expr{ExprFor{init_s, expand_expr(n.cond, depth), step_e,
+                                 expand_expr(n.body, depth)},
+                         expr->span});
+            } else if constexpr (std::is_same_v<T, ExprBlock>) {
+                std::vector<StmtPtr> out_s;
+                for (const auto& s : n.stmts) out_s.push_back(expand_stmt(s));
+                return std::make_shared<Expr>(Expr{ExprBlock{std::move(out_s)}, expr->span});
             } else {
                 return expr;
             }

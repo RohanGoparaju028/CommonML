@@ -1,4 +1,5 @@
 #include "cml/builtins.hpp"
+#include "builtins_internal.hpp"
 #include "cml/source.hpp"
 
 #include <cmath>
@@ -6,6 +7,21 @@
 #include <stdexcept>
 
 namespace cml {
+
+namespace {
+std::vector<std::string>& cli_args_storage() {
+    static std::vector<std::string> args;
+    return args;
+}
+}  // namespace
+
+void set_cli_args(std::vector<std::string> args) {
+    cli_args_storage() = std::move(args);
+}
+
+const std::vector<std::string>& get_cli_args() {
+    return cli_args_storage();
+}
 
 const std::vector<BuiltinDef>& get_builtins() {
     static const std::vector<BuiltinDef> builtins = []() {
@@ -122,7 +138,7 @@ const std::vector<BuiltinDef>& get_builtins() {
             1,
             [](const std::vector<Value>& args) {
                 return Value::make_int(
-                    static_cast<int64_t>(std::get<ValList>(args[0].node).elems.size()));
+                    static_cast<int64_t>(std::get<ValList>(args[0].node).ptr->elems.size()));
             },
         });
 
@@ -132,7 +148,7 @@ const std::vector<BuiltinDef>& get_builtins() {
             TypeScheme{{0}, make_tfun(list_type(tv(0)), bool_type())},
             1,
             [](const std::vector<Value>& args) {
-                return Value::make_bool(std::get<ValList>(args[0].node).elems.empty());
+                return Value::make_bool(std::get<ValList>(args[0].node).ptr->elems.empty());
             },
         });
 
@@ -142,7 +158,7 @@ const std::vector<BuiltinDef>& get_builtins() {
             TypeScheme{{0}, make_tfun(list_type(tv(0)), tv(0))},
             1,
             [](const std::vector<Value>& args) {
-                const auto& elems = std::get<ValList>(args[0].node).elems;
+                const auto& elems = std::get<ValList>(args[0].node).ptr->elems;
                 if (elems.empty()) {
                     throw CompileError(Diagnostic{"runtime", "head called on empty list", {}});
                 }
@@ -156,7 +172,7 @@ const std::vector<BuiltinDef>& get_builtins() {
             TypeScheme{{0}, make_tfun(list_type(tv(0)), list_type(tv(0)))},
             1,
             [](const std::vector<Value>& args) {
-                const auto& elems = std::get<ValList>(args[0].node).elems;
+                const auto& elems = std::get<ValList>(args[0].node).ptr->elems;
                 if (elems.empty()) {
                     throw CompileError(Diagnostic{"runtime", "tail called on empty list", {}});
                 }
@@ -174,6 +190,11 @@ const std::vector<BuiltinDef>& get_builtins() {
                     "runtime", "panic: " + std::get<ValString>(args[0].node).value, {}});
             },
         });
+
+        detail::append_string_list_builtins(list);
+        detail::append_collection_builtins(list);
+        detail::append_io_builtins(list);
+        detail::append_net_builtins(list);
 
         return list;
     }();

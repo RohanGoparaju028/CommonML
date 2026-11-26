@@ -51,25 +51,36 @@ void Parser::error(const Token& tok, const std::string& msg) const {
     throw CompileError(Diagnostic{"parse", msg, tok.span});
 }
 
+void Parser::skip_stmt_seps() {
+    while (match(TokenKind::Newline) || match(TokenKind::Semicolon)) {}
+}
+
+bool Parser::starts_indented_block() const {
+    return check(TokenKind::Indent) ||
+           (check(TokenKind::Newline) && peek(1).kind == TokenKind::Indent);
+}
+
 Program Parser::parse_program() {
     Program prog;
-    while (match(TokenKind::Semicolon)) {}
+    skip_stmt_seps();
     while (!at_end()) {
-        prog.stmts.push_back(parse_stmt());
-        while (match(TokenKind::Semicolon)) {}
+        prog.stmts.push_back(parse_stmt(false));
+        skip_stmt_seps();
     }
     return prog;
 }
 
 ExprPtr Parser::parse_single_expr() {
+    skip_stmt_seps();
     auto expr = parse_seq_expr();
+    skip_stmt_seps();
     if (!at_end()) {
         error(peek(), "unexpected trailing token");
     }
     return expr;
 }
 
-StmtPtr Parser::parse_stmt() {
+StmtPtr Parser::parse_stmt(bool in_block) {
     size_t prev_col = top_stmt_col_;
     top_stmt_col_ = peek().span.column;
     struct Restore {
@@ -81,13 +92,47 @@ StmtPtr Parser::parse_stmt() {
     if (check(TokenKind::KwType)) {
         return parse_type_decl();
     }
+    if (check(TokenKind::KwStruct)) {
+        return parse_struct_decl();
+    }
     if (check(TokenKind::KwLet)) {
-        return parse_let_stmt();
+        return parse_let_stmt(in_block);
+    }
+    if (check(TokenKind::KwVar)) {
+        return parse_var_stmt();
     }
     if (check(TokenKind::KwMacro)) {
         return parse_macro_stmt();
     }
+    return parse_assign_or_expr();
+}
+
+StmtPtr Parser::parse_assign_or_expr() {
     auto expr = parse_expr();
+    if (match(TokenKind::Eq)) {
+        auto rhs = parse_block_or_expr();
+        SourceSpan span = SourceSpan::merge(expr->span, rhs->span);
+        if (auto* v = std::get_if<ExprVar>(&expr->node)) {
+            auto assign = std::make_shared<Expr>(Expr{ExprAssign{v->ident, rhs}, span});
+            return std::make_shared<Stmt>(Stmt{StmtExpr{assign}, span});
+        }
+        if (auto* fg = std::get_if<ExprFieldGet>(&expr->node)) {
+            auto fset =
+                std::make_shared<Expr>(Expr{ExprFieldSet{fg->obj, fg->field, rhs}, span});
+            return std::make_shared<Stmt>(Stmt{StmtExpr{fset}, span});
+        }
+        if (auto* pfg = std::get_if<ExprPtrFieldGet>(&expr->node)) {
+            auto pfset =
+                std::make_shared<Expr>(Expr{ExprPtrFieldSet{pfg->ptr, pfg->field, rhs}, span});
+            return std::make_shared<Stmt>(Stmt{StmtExpr{pfset}, span});
+        }
+        if (auto* un = std::get_if<ExprUnary>(&expr->node); un && un->op == UnaryOp::Deref) {
+            auto dset =
+                std::make_shared<Expr>(Expr{ExprDerefSet{un->operand, rhs}, span});
+            return std::make_shared<Stmt>(Stmt{StmtExpr{dset}, span});
+        }
+        error(peek(), "invalid assignment target");
+    }
     return std::make_shared<Stmt>(Stmt{StmtExpr{expr}, expr->span});
 }
 
@@ -103,6 +148,14 @@ StmtPtr Parser::parse_type_decl() {
     }
 
     expect(TokenKind::Eq, "expected '=' in type declaration");
+    bool has_indent = false;
+    if (starts_indented_block()) {
+        match(TokenKind::Newline);
+        expect(TokenKind::Indent, "expected indent in type declaration");
+        has_indent = true;
+    } else {
+        match(TokenKind::Newline);
+    }
     match(TokenKind::Pipe);
 
     std::vector<CtorDecl> ctors;
@@ -121,13 +174,93 @@ StmtPtr Parser::parse_type_decl() {
     };
 
     parse_ctor();
-    while (match(TokenKind::Pipe)) {
-        parse_ctor();
+    while (true) {
+        if (match(TokenKind::Pipe)) {
+            parse_ctor();
+        } else if (check(TokenKind::Newline) && peek(1).kind == TokenKind::Pipe) {
+            advance();
+            advance();
+            parse_ctor();
+        } else {
+            break;
+        }
+    }
+    if (has_indent) {
+        match(TokenKind::Newline);
+        expect(TokenKind::Dedent, "expected dedent after type declaration");
     }
 
     SourceSpan span = SourceSpan::merge(kw.span, ctors.back().span);
     return std::make_shared<Stmt>(
         Stmt{StmtTypeDecl{std::move(type_name), std::move(type_params), std::move(ctors)}, span});
+}
+
+StmtPtr Parser::parse_struct_body(const SourceSpan& start_span, const Ident& struct_name,
+                                  std::vector<Ident> type_params) {
+    std::vector<StructFieldDecl> fields;
+    SourceSpan end_span = struct_name.span;
+
+    // Allow optional ':' or '=' before '{' or indented block (e.g. `let rect = struct:`)
+    if (check(TokenKind::Colon) || check(TokenKind::Eq)) {
+        advance();
+    }
+
+    if (match(TokenKind::LBrace)) {
+        ++expr_delim_depth_;
+        if (!check(TokenKind::RBrace)) {
+            while (!check(TokenKind::RBrace) && !at_end()) {
+                const Token& fname = expect(TokenKind::LowerIdent, "expected field name");
+                expect(TokenKind::Colon, "expected ':' after struct field name");
+                TypeExprPtr fty = parse_type();
+                SourceSpan fspan = SourceSpan::merge(fname.span, fty->span);
+                fields.push_back(
+                    StructFieldDecl{Ident{fname.lexeme, {}, fname.span}, std::move(fty), fspan});
+                match(TokenKind::Comma);
+            }
+        }
+        --expr_delim_depth_;
+        const Token& rb = expect(TokenKind::RBrace, "expected '}' after struct fields");
+        end_span = rb.span;
+    } else if (starts_indented_block()) {
+        match(TokenKind::Newline);
+        expect(TokenKind::Indent, "expected indented struct fields");
+        while (!check(TokenKind::Dedent) && !at_end()) {
+            skip_stmt_seps();
+            if (check(TokenKind::Dedent) || at_end()) break;
+            const Token& fname = expect(TokenKind::LowerIdent, "expected field name");
+            expect(TokenKind::Colon, "expected ':' after struct field name");
+            TypeExprPtr fty = parse_type();
+            SourceSpan fspan = SourceSpan::merge(fname.span, fty->span);
+            end_span = fspan;
+            fields.push_back(
+                StructFieldDecl{Ident{fname.lexeme, {}, fname.span}, std::move(fty), fspan});
+            skip_stmt_seps();
+        }
+        expect(TokenKind::Dedent, "expected dedent after struct fields");
+    } else {
+        error(peek(), "expected '{' or indented block in struct declaration");
+    }
+
+    SourceSpan span = SourceSpan::merge(start_span, end_span);
+    return std::make_shared<Stmt>(
+        Stmt{StmtStructDecl{struct_name, std::move(type_params), std::move(fields)}, span});
+}
+
+StmtPtr Parser::parse_struct_decl() {
+    const Token& kw = expect(TokenKind::KwStruct, "expected 'struct'");
+    const Token& name_tok =
+        (check(TokenKind::UpperIdent) || check(TokenKind::LowerIdent))
+            ? advance()
+            : expect(TokenKind::UpperIdent, "expected struct name");
+    Ident struct_name{name_tok.lexeme, {}, name_tok.span};
+
+    std::vector<Ident> type_params;
+    while (check(TokenKind::LowerIdent)) {
+        const Token& tp = advance();
+        type_params.push_back(Ident{tp.lexeme, {}, tp.span});
+    }
+
+    return parse_struct_body(kw.span, struct_name, std::move(type_params));
 }
 
 Parser::Param Parser::parse_param() {
@@ -161,9 +294,23 @@ static ExprPtr wrap_fn_params(const std::vector<Parser::Param>& params,
     return body;
 }
 
-StmtPtr Parser::parse_let_stmt() {
+StmtPtr Parser::parse_let_stmt(bool in_block) {
     const Token& kw = expect(TokenKind::KwLet, "expected 'let'");
     bool is_rec = match(TokenKind::KwRec);
+
+    if (!is_rec && (check(TokenKind::LowerIdent) || check(TokenKind::UpperIdent)) &&
+        peek(1).kind == TokenKind::Eq && peek(2).kind == TokenKind::KwStruct) {
+        const Token& sname = advance();
+        advance();  // '='
+        advance();  // 'struct'
+        std::vector<Ident> type_params;
+        while (check(TokenKind::LowerIdent)) {
+            const Token& tp = advance();
+            type_params.push_back(Ident{tp.lexeme, {}, tp.span});
+        }
+        return parse_struct_body(kw.span, Ident{sname.lexeme, {}, sname.span},
+                                 std::move(type_params));
+    }
 
     PatternPtr pat;
     std::vector<Param> params;
@@ -186,7 +333,7 @@ StmtPtr Parser::parse_let_stmt() {
     }
 
     expect(TokenKind::Eq, "expected '=' in let binding");
-    ExprPtr val = parse_expr();
+    ExprPtr val = parse_block_or_expr();
 
     if (!params.empty()) {
         val = wrap_fn_params(params, ann, val);
@@ -197,9 +344,39 @@ StmtPtr Parser::parse_let_stmt() {
         error(peek(), "'let rec' requires a simple variable name");
     }
 
+    if (in_block && (check(TokenKind::KwIn) ||
+                     (check(TokenKind::Newline) && peek(1).kind == TokenKind::KwIn))) {
+        match(TokenKind::Newline);
+        advance();
+        if (check(TokenKind::Newline) && peek(1).kind != TokenKind::Indent) {
+            advance();
+        }
+        ExprPtr body = parse_block_or_expr();
+        SourceSpan span = SourceSpan::merge(kw.span, body->span);
+        auto let_e = std::make_shared<Expr>(
+            Expr{ExprLet{is_rec, std::move(pat), std::move(ann), std::move(val), std::move(body)},
+                 span});
+        return std::make_shared<Stmt>(Stmt{StmtExpr{let_e}, span});
+    }
+
     SourceSpan span = SourceSpan::merge(kw.span, val->span);
     return std::make_shared<Stmt>(
         Stmt{StmtLet{is_rec, std::move(pat), std::move(ann), std::move(val)}, span});
+}
+
+StmtPtr Parser::parse_var_stmt() {
+    const Token& kw = expect(TokenKind::KwVar, "expected 'var'");
+    const Token& name_tok = expect(TokenKind::LowerIdent, "expected variable name after 'var'");
+    Ident name{name_tok.lexeme, {}, name_tok.span};
+    std::optional<TypeExprPtr> ann;
+    if (match(TokenKind::Colon)) {
+        ann = parse_type();
+    }
+    expect(TokenKind::Eq, "expected '=' in var declaration");
+    ExprPtr val = parse_block_or_expr();
+    SourceSpan span = SourceSpan::merge(kw.span, val->span);
+    return std::make_shared<Stmt>(
+        Stmt{StmtVar{std::move(name), std::move(ann), std::move(val)}, span});
 }
 
 StmtPtr Parser::parse_macro_stmt() {
@@ -213,7 +390,7 @@ StmtPtr Parser::parse_macro_stmt() {
         params.push_back(Ident{p.lexeme, {}, p.span});
     }
     expect(TokenKind::Eq, "expected '=' in macro definition");
-    ExprPtr body = parse_expr();
+    ExprPtr body = parse_block_or_expr();
     SourceSpan span = SourceSpan::merge(kw.span, body->span);
     return std::make_shared<Stmt>(
         Stmt{StmtMacro{std::move(name), std::move(params), std::move(body)}, span});
@@ -260,6 +437,12 @@ TypeExprPtr Parser::parse_type_app() {
 }
 
 TypeExprPtr Parser::parse_type_atom() {
+    if (match(TokenKind::Star)) {
+        const Token& star_tok = previous();
+        auto inner = parse_type_atom();
+        SourceSpan span = SourceSpan::merge(star_tok.span, inner->span);
+        return std::make_shared<TypeExpr>(TypeExpr{TPtr{std::move(inner)}, span});
+    }
     if (check(TokenKind::LowerIdent)) {
         const Token& tok = advance();
         return std::make_shared<TypeExpr>(TypeExpr{TVar{tok.lexeme}, tok.span});
@@ -356,21 +539,21 @@ PatternPtr Parser::parse_pat_atom() {
     }
     if (match(TokenKind::Dollar)) {
         if (quote_depth_ <= 0) {
-            error(tok, "'$' unquote can only be used inside 'quote { ... }'");
+            error(tok, "'$' unquote pattern can only be used inside 'quote { ... }'");
         }
-        ExprPtr e;
         if (match(TokenKind::LParen)) {
             --quote_depth_;
-            e = parse_seq_expr();
+            ExprPtr e = parse_seq_expr();
             ++quote_depth_;
-            const Token& rp = expect(TokenKind::RParen, "expected ')' after unquote");
+            const Token& rp = expect(TokenKind::RParen, "expected ')' after unquote pattern");
             return std::make_shared<Pattern>(
                 Pattern{PatUnquote{e}, SourceSpan::merge(tok.span, rp.span)});
         }
         const Token& id = expect(TokenKind::LowerIdent, "expected identifier or '(' after '$'");
-        e = std::make_shared<Expr>(Expr{ExprVar{Ident{id.lexeme, {}, id.span}}, id.span});
+        auto var = std::make_shared<Expr>(
+            Expr{ExprVar{Ident{id.lexeme, {}, id.span}}, id.span});
         return std::make_shared<Pattern>(
-            Pattern{PatUnquote{e}, SourceSpan::merge(tok.span, id.span)});
+            Pattern{PatUnquote{var}, SourceSpan::merge(tok.span, id.span)});
     }
     if (match(TokenKind::LParen)) {
         if (match(TokenKind::RParen)) {
@@ -383,7 +566,7 @@ PatternPtr Parser::parse_pat_atom() {
             do {
                 elems.push_back(parse_pattern());
             } while (match(TokenKind::Comma));
-            const Token& rp = expect(TokenKind::RParen, "expected ')' in tuple pattern");
+            const Token& rp = expect(TokenKind::RParen, "expected ')' after tuple pattern");
             return std::make_shared<Pattern>(
                 Pattern{PatTuple{std::move(elems)}, SourceSpan::merge(tok.span, rp.span)});
         }
@@ -404,20 +587,66 @@ PatternPtr Parser::parse_pat_atom() {
     error(tok, "expected pattern");
 }
 
+ExprPtr Parser::parse_block() {
+    match(TokenKind::Newline);
+    const Token& ind = expect(TokenKind::Indent, "expected indented block");
+    std::vector<StmtPtr> stmts;
+    SourceSpan end_span = ind.span;
+
+    while (!check(TokenKind::Dedent) && !at_end()) {
+        skip_stmt_seps();
+        if (check(TokenKind::Dedent) || at_end()) break;
+        StmtPtr s = parse_stmt(true);
+        end_span = s->span;
+        stmts.push_back(std::move(s));
+        skip_stmt_seps();
+    }
+    const Token& ded = expect(TokenKind::Dedent, "expected dedent after block");
+    SourceSpan span = SourceSpan::merge(ind.span, stmts.empty() ? ded.span : end_span);
+    return std::make_shared<Expr>(Expr{ExprBlock{std::move(stmts)}, span});
+}
+
+ExprPtr Parser::parse_block_or_expr() {
+    if (starts_indented_block()) {
+        return parse_block();
+    }
+    return parse_expr();
+}
+
 ExprPtr Parser::parse_expr() {
-    if (check(TokenKind::KwLet)) return parse_let_expr();
-    if (check(TokenKind::KwFn)) return parse_fn_expr();
-    if (check(TokenKind::KwIf)) return parse_if_expr();
-    if (check(TokenKind::KwMatch)) return parse_match_expr();
+    if (match(TokenKind::KwDefer)) {
+        const Token& kw = previous();
+        if (check(TokenKind::Colon) || check(TokenKind::Eq)) {
+            advance();
+        }
+        ExprPtr action = parse_block_or_expr();
+        SourceSpan span = SourceSpan::merge(kw.span, action->span);
+        return std::make_shared<Expr>(Expr{ExprDefer{std::move(action)}, span});
+    }
+    if (check(TokenKind::KwLet)) {
+        return parse_let_expr();
+    }
+    if (check(TokenKind::KwFn)) {
+        return parse_fn_expr();
+    }
+    if (check(TokenKind::KwIf)) {
+        return parse_if_expr();
+    }
+    if (check(TokenKind::KwMatch)) {
+        return parse_match_expr();
+    }
+    if (check(TokenKind::KwWhile)) {
+        return parse_while_expr();
+    }
+    if (check(TokenKind::KwFor)) {
+        return parse_for_expr();
+    }
     return parse_binary(1);
 }
 
 ExprPtr Parser::parse_seq_expr() {
     auto first = parse_expr();
     while (match(TokenKind::Semicolon)) {
-        if (check(TokenKind::RParen) || check(TokenKind::RBrace) || check(TokenKind::KwEnd)) {
-            break;
-        }
         auto next = parse_expr();
         SourceSpan span = SourceSpan::merge(first->span, next->span);
         first = std::make_shared<Expr>(Expr{ExprBinary{BinaryOp::Seq, first, next}, span});
@@ -449,7 +678,7 @@ ExprPtr Parser::parse_let_expr() {
         ann = parse_type();
     }
     expect(TokenKind::Eq, "expected '=' in let expression");
-    ExprPtr val = parse_expr();
+    ExprPtr val = parse_block_or_expr();
 
     if (!params.empty()) {
         val = wrap_fn_params(params, ann, val);
@@ -460,8 +689,14 @@ ExprPtr Parser::parse_let_expr() {
         error(peek(), "'let rec' requires a simple variable name");
     }
 
+    if (check(TokenKind::Newline) && peek(1).kind == TokenKind::KwIn) {
+        advance();
+    }
     expect(TokenKind::KwIn, "expected 'in' after let binding");
-    ExprPtr body = parse_expr();
+    if (check(TokenKind::Newline) && peek(1).kind != TokenKind::Indent) {
+        advance();
+    }
+    ExprPtr body = parse_block_or_expr();
     SourceSpan span = SourceSpan::merge(kw.span, body->span);
     return std::make_shared<Expr>(
         Expr{ExprLet{is_rec, std::move(pat), std::move(ann), std::move(val), std::move(body)},
@@ -471,22 +706,122 @@ ExprPtr Parser::parse_let_expr() {
 ExprPtr Parser::parse_fn_expr() {
     const Token& kw = expect(TokenKind::KwFn, "expected 'fn'");
     std::vector<Param> params;
-    do {
-        params.push_back(parse_param());
-    } while (!check(TokenKind::Arrow) && !at_end());
-    expect(TokenKind::Arrow, "expected '->' in fn expression");
-    ExprPtr body = parse_expr();
-    ExprPtr fn = wrap_fn_params(params, std::nullopt, body);
+    std::optional<TypeExprPtr> ret_ann;
+
+    if (check(TokenKind::LParen)) {
+        size_t saved = pos_;
+        const Token& lp = advance();
+        if (match(TokenKind::RParen)) {
+            const Token& rp = previous();
+            SourceSpan uspan = SourceSpan::merge(lp.span, rp.span);
+            params.push_back(Param{
+                std::make_shared<Pattern>(Pattern{PatUnit{}, uspan}),
+                std::make_shared<TypeExpr>(TypeExpr{TCon{"Unit", {}}, uspan}),
+                uspan,
+            });
+        } else {
+            // Disambiguate `fn(a: T, b: T)` / `fn(a, b) : Ret:` vs ML `fn (a, b) -> ...`
+            bool is_param_list = false;
+            int depth = 1;
+            bool saw_colon_at_depth1 = false;
+            size_t scan = pos_;
+            while (scan < tokens_.size() && depth > 0) {
+                TokenKind k = tokens_[scan].kind;
+                if (k == TokenKind::LParen) ++depth;
+                else if (k == TokenKind::RParen) {
+                    --depth;
+                    if (depth == 0) break;
+                } else if (depth == 1 && k == TokenKind::Colon) {
+                    saw_colon_at_depth1 = true;
+                }
+                ++scan;
+            }
+            if (saw_colon_at_depth1) {
+                is_param_list = true;
+            } else if (scan + 1 < tokens_.size()) {
+                TokenKind after = tokens_[scan + 1].kind;
+                if (after == TokenKind::Colon || after == TokenKind::Eq) {
+                    is_param_list = true;
+                }
+            }
+
+            if (is_param_list) {
+                ++expr_delim_depth_;
+                do {
+                    PatternPtr p = parse_pattern();
+                    std::optional<TypeExprPtr> pty;
+                    SourceSpan pspan = p->span;
+                    if (match(TokenKind::Colon)) {
+                        pty = parse_type();
+                        pspan = SourceSpan::merge(pspan, (*pty)->span);
+                    }
+                    params.push_back(Param{std::move(p), std::move(pty), pspan});
+                } while (match(TokenKind::Comma));
+                --expr_delim_depth_;
+                expect(TokenKind::RParen, "expected ')' after parameter list");
+            } else {
+                pos_ = saved;
+                do {
+                    params.push_back(parse_param());
+                } while (!check(TokenKind::Arrow) && !check(TokenKind::Eq) &&
+                         !check(TokenKind::Colon) && !at_end());
+            }
+        }
+    } else {
+        do {
+            params.push_back(parse_param());
+        } while (!check(TokenKind::Arrow) && !check(TokenKind::Eq) &&
+                 !check(TokenKind::Colon) && !at_end());
+    }
+
+    bool body_delim_matched = false;
+    if (match(TokenKind::Colon)) {
+        if (starts_indented_block()) {
+            body_delim_matched = true;
+        } else {
+            ret_ann = parse_type();
+            if (match(TokenKind::Colon) || match(TokenKind::Eq) || match(TokenKind::Arrow)) {
+                body_delim_matched = true;
+            }
+        }
+    } else if (match(TokenKind::Arrow) || match(TokenKind::Eq)) {
+        body_delim_matched = true;
+    }
+
+    if (!body_delim_matched && !starts_indented_block()) {
+        error(peek(), "expected '->', '=', ':' or indented block in fn expression");
+    }
+
+    ExprPtr body = parse_block_or_expr();
+    ExprPtr fn = wrap_fn_params(params, ret_ann, body);
     return std::make_shared<Expr>(Expr{fn->node, SourceSpan::merge(kw.span, body->span)});
 }
 
 ExprPtr Parser::parse_if_expr() {
     const Token& kw = expect(TokenKind::KwIf, "expected 'if'");
     ExprPtr cond = parse_expr();
-    expect(TokenKind::KwThen, "expected 'then'");
-    ExprPtr then_br = parse_expr();
-    expect(TokenKind::KwElse, "expected 'else'");
-    ExprPtr else_br = parse_expr();
+    ExprPtr then_br;
+    if (match(TokenKind::KwThen) || match(TokenKind::Eq) || match(TokenKind::Colon)) {
+        then_br = parse_block_or_expr();
+    } else if (starts_indented_block()) {
+        then_br = parse_block();
+    } else {
+        error(peek(), "expected 'then', '=', ':' or indented block in if expression");
+    }
+
+    ExprPtr else_br;
+    if (match(TokenKind::KwElse)) {
+        if (check(TokenKind::Eq) || check(TokenKind::Colon)) advance();
+        else_br = parse_block_or_expr();
+    } else if (check(TokenKind::Newline) && peek(1).kind == TokenKind::KwElse) {
+        advance();
+        advance();
+        if (check(TokenKind::Eq) || check(TokenKind::Colon)) advance();
+        else_br = parse_block_or_expr();
+    } else {
+        else_br = std::make_shared<Expr>(Expr{ExprUnit{}, then_br->span});
+    }
+
     SourceSpan span = SourceSpan::merge(kw.span, else_br->span);
     return std::make_shared<Expr>(Expr{ExprIf{cond, then_br, else_br}, span});
 }
@@ -494,22 +829,115 @@ ExprPtr Parser::parse_if_expr() {
 ExprPtr Parser::parse_match_expr() {
     const Token& kw = expect(TokenKind::KwMatch, "expected 'match'");
     ExprPtr scrutinee = parse_expr();
-    expect(TokenKind::KwWith, "expected 'with'");
+    if (!match(TokenKind::KwWith) && !match(TokenKind::Eq) && !match(TokenKind::Colon)) {
+        error(peek(), "expected 'with', '=', or ':' in match expression");
+    }
+
+    bool has_indent = false;
+    if (starts_indented_block()) {
+        match(TokenKind::Newline);
+        expect(TokenKind::Indent, "expected indent in match expression");
+        has_indent = true;
+    } else {
+        match(TokenKind::Newline);
+    }
     match(TokenKind::Pipe);
 
     std::vector<MatchArm> arms;
     auto parse_arm = [&]() {
         PatternPtr pat = parse_pattern();
         expect(TokenKind::Arrow, "expected '->' in match arm");
-        ExprPtr body = parse_expr();
+        bool old_stop = stop_at_pipe_;
+        int old_depth = match_arm_delim_depth_;
+        stop_at_pipe_ = true;
+        match_arm_delim_depth_ = expr_delim_depth_;
+        ExprPtr body = parse_block_or_expr();
+        stop_at_pipe_ = old_stop;
+        match_arm_delim_depth_ = old_depth;
         arms.push_back(MatchArm{pat, body, SourceSpan::merge(pat->span, body->span)});
     };
     parse_arm();
-    while (match(TokenKind::Pipe)) {
-        parse_arm();
+    while (true) {
+        if (match(TokenKind::Pipe)) {
+            parse_arm();
+        } else if (check(TokenKind::Newline) && peek(1).kind == TokenKind::Pipe) {
+            advance();
+            advance();
+            parse_arm();
+        } else {
+            break;
+        }
+    }
+    if (has_indent) {
+        match(TokenKind::Newline);
+        expect(TokenKind::Dedent, "expected dedent after match arms");
     }
     SourceSpan span = SourceSpan::merge(kw.span, arms.back().span);
     return std::make_shared<Expr>(Expr{ExprMatch{scrutinee, std::move(arms)}, span});
+}
+
+ExprPtr Parser::parse_while_expr() {
+    const Token& kw = expect(TokenKind::KwWhile, "expected 'while'");
+    ExprPtr cond = parse_expr();
+    if (check(TokenKind::Eq) || check(TokenKind::Colon)) advance();
+    ExprPtr body = parse_block_or_expr();
+    SourceSpan span = SourceSpan::merge(kw.span, body->span);
+    return std::make_shared<Expr>(Expr{ExprWhile{cond, body}, span});
+}
+
+ExprPtr Parser::parse_for_expr() {
+    const Token& kw = expect(TokenKind::KwFor, "expected 'for'");
+    if (match(TokenKind::KwEach)) {
+        PatternPtr pat = parse_pattern();
+        expect(TokenKind::KwIn, "expected 'in' in 'for each'");
+        ExprPtr iterable = parse_expr();
+        if (check(TokenKind::Eq) || check(TokenKind::Colon)) advance();
+        ExprPtr body = parse_block_or_expr();
+        SourceSpan span = SourceSpan::merge(kw.span, body->span);
+        return std::make_shared<Expr>(Expr{ExprForEach{pat, iterable, body}, span});
+    }
+
+    bool has_paren = match(TokenKind::LParen);
+    if (has_paren) ++expr_delim_depth_;
+
+    std::optional<StmtPtr> init;
+    if (!match(TokenKind::Semicolon)) {
+        if (check(TokenKind::KwVar)) {
+            init = parse_var_stmt();
+        } else {
+            init = parse_assign_or_expr();
+        }
+        expect(TokenKind::Semicolon, "expected ';' after for-loop initializer");
+    }
+
+    ExprPtr cond;
+    if (match(TokenKind::Semicolon)) {
+        cond = std::make_shared<Expr>(Expr{ExprBool{true}, kw.span});
+    } else {
+        cond = parse_expr();
+        expect(TokenKind::Semicolon, "expected ';' after for-loop condition");
+    }
+
+    std::optional<ExprPtr> step;
+    bool at_step_end = has_paren ? check(TokenKind::RParen)
+                                 : (starts_indented_block() || check(TokenKind::Newline));
+    if (!at_step_end) {
+        StmtPtr step_stmt = parse_assign_or_expr();
+        if (auto* es = std::get_if<StmtExpr>(&step_stmt->node)) {
+            step = es->expr;
+        }
+    }
+
+    if (has_paren) {
+        --expr_delim_depth_;
+        expect(TokenKind::RParen, "expected ')' after for-loop clauses");
+    }
+
+    if (check(TokenKind::Eq) || check(TokenKind::Colon)) advance();
+    ExprPtr body = parse_block_or_expr();
+    SourceSpan span = SourceSpan::merge(kw.span, body->span);
+    return std::make_shared<Expr>(
+        Expr{ExprFor{std::move(init), std::move(cond), std::move(step), std::move(body)}, span});
 }
 
 struct BinOpInfo {
@@ -523,23 +951,28 @@ static std::optional<BinOpInfo> lookup_binop(TokenKind k) {
         case TokenKind::PipeGt: return BinOpInfo{BinaryOp::Pipe, 1, false};
         case TokenKind::PipePipe: return BinOpInfo{BinaryOp::Or, 2, false};
         case TokenKind::AmpAmp: return BinOpInfo{BinaryOp::And, 3, false};
-        case TokenKind::EqEq: return BinOpInfo{BinaryOp::Eq, 4, false};
-        case TokenKind::BangEq: return BinOpInfo{BinaryOp::Neq, 4, false};
-        case TokenKind::Lt: return BinOpInfo{BinaryOp::Lt, 4, false};
-        case TokenKind::LtEq: return BinOpInfo{BinaryOp::Le, 4, false};
-        case TokenKind::Gt: return BinOpInfo{BinaryOp::Gt, 4, false};
-        case TokenKind::GtEq: return BinOpInfo{BinaryOp::Ge, 4, false};
-        case TokenKind::ColonColon: return BinOpInfo{BinaryOp::Cons, 5, true};
-        case TokenKind::Plus: return BinOpInfo{BinaryOp::AddInt, 6, false};
-        case TokenKind::Minus: return BinOpInfo{BinaryOp::SubInt, 6, false};
-        case TokenKind::PlusDot: return BinOpInfo{BinaryOp::AddFloat, 6, false};
-        case TokenKind::MinusDot: return BinOpInfo{BinaryOp::SubFloat, 6, false};
-        case TokenKind::PlusPlus: return BinOpInfo{BinaryOp::ConcatStr, 6, false};
-        case TokenKind::Star: return BinOpInfo{BinaryOp::MulInt, 7, false};
-        case TokenKind::Slash: return BinOpInfo{BinaryOp::DivInt, 7, false};
-        case TokenKind::Percent: return BinOpInfo{BinaryOp::ModInt, 7, false};
-        case TokenKind::StarDot: return BinOpInfo{BinaryOp::MulFloat, 7, false};
-        case TokenKind::SlashDot: return BinOpInfo{BinaryOp::DivFloat, 7, false};
+        case TokenKind::Pipe: return BinOpInfo{BinaryOp::BitOr, 4, false};
+        case TokenKind::Caret: return BinOpInfo{BinaryOp::BitXor, 5, false};
+        case TokenKind::Amp: return BinOpInfo{BinaryOp::BitAnd, 6, false};
+        case TokenKind::EqEq: return BinOpInfo{BinaryOp::Eq, 7, false};
+        case TokenKind::BangEq: return BinOpInfo{BinaryOp::Neq, 7, false};
+        case TokenKind::Lt: return BinOpInfo{BinaryOp::Lt, 7, false};
+        case TokenKind::LtEq: return BinOpInfo{BinaryOp::Le, 7, false};
+        case TokenKind::Gt: return BinOpInfo{BinaryOp::Gt, 7, false};
+        case TokenKind::GtEq: return BinOpInfo{BinaryOp::Ge, 7, false};
+        case TokenKind::LtLt: return BinOpInfo{BinaryOp::Shl, 8, false};
+        case TokenKind::GtGt: return BinOpInfo{BinaryOp::Shr, 8, false};
+        case TokenKind::ColonColon: return BinOpInfo{BinaryOp::Cons, 9, true};
+        case TokenKind::Plus: return BinOpInfo{BinaryOp::AddInt, 10, false};
+        case TokenKind::Minus: return BinOpInfo{BinaryOp::SubInt, 10, false};
+        case TokenKind::PlusDot: return BinOpInfo{BinaryOp::AddFloat, 10, false};
+        case TokenKind::MinusDot: return BinOpInfo{BinaryOp::SubFloat, 10, false};
+        case TokenKind::PlusPlus: return BinOpInfo{BinaryOp::ConcatStr, 10, false};
+        case TokenKind::Star: return BinOpInfo{BinaryOp::MulInt, 11, false};
+        case TokenKind::Slash: return BinOpInfo{BinaryOp::DivInt, 11, false};
+        case TokenKind::Percent: return BinOpInfo{BinaryOp::ModInt, 11, false};
+        case TokenKind::StarDot: return BinOpInfo{BinaryOp::MulFloat, 11, false};
+        case TokenKind::SlashDot: return BinOpInfo{BinaryOp::DivFloat, 11, false};
         default: return std::nullopt;
     }
 }
@@ -547,8 +980,15 @@ static std::optional<BinOpInfo> lookup_binop(TokenKind k) {
 ExprPtr Parser::parse_binary(int min_prec) {
     auto left = parse_unary();
     while (true) {
+        if (check(TokenKind::Newline) && peek(1).kind == TokenKind::PipeGt) {
+            advance();
+        }
         auto info = lookup_binop(peek().kind);
         if (!info || info->prec < min_prec) {
+            break;
+        }
+        if (info->op == BinaryOp::BitOr && stop_at_pipe_ &&
+            expr_delim_depth_ == match_arm_delim_depth_) {
             break;
         }
         advance();
@@ -565,12 +1005,34 @@ ExprPtr Parser::parse_binary(int min_prec) {
 }
 
 ExprPtr Parser::parse_unary() {
-    if (check(TokenKind::Minus) || check(TokenKind::MinusDot)) {
+    if (check(TokenKind::Minus) || check(TokenKind::MinusDot) || check(TokenKind::Tilde) ||
+        check(TokenKind::Bang) || check(TokenKind::Star) || check(TokenKind::Amp)) {
         const Token& op_tok = advance();
-        UnaryOp op = (op_tok.kind == TokenKind::MinusDot) ? UnaryOp::NegFloat : UnaryOp::NegInt;
+        UnaryOp op = UnaryOp::NegInt;
+        switch (op_tok.kind) {
+            case TokenKind::Minus: op = UnaryOp::NegInt; break;
+            case TokenKind::MinusDot: op = UnaryOp::NegFloat; break;
+            case TokenKind::Tilde: op = UnaryOp::BitNot; break;
+            case TokenKind::Bang: op = UnaryOp::LogicalNot; break;
+            case TokenKind::Star: op = UnaryOp::Deref; break;
+            case TokenKind::Amp: op = UnaryOp::AddrOf; break;
+            default: break;
+        }
         auto operand = parse_unary();
         SourceSpan span = SourceSpan::merge(op_tok.span, operand->span);
         return std::make_shared<Expr>(Expr{ExprUnary{op, operand}, span});
+    }
+    if (match(TokenKind::KwNew)) {
+        const Token& kw = previous();
+        auto operand = parse_unary();
+        SourceSpan span = SourceSpan::merge(kw.span, operand->span);
+        return std::make_shared<Expr>(Expr{ExprNew{std::move(operand)}, span});
+    }
+    if (match(TokenKind::KwClose)) {
+        const Token& kw = previous();
+        auto operand = parse_unary();
+        SourceSpan span = SourceSpan::merge(kw.span, operand->span);
+        return std::make_shared<Expr>(Expr{ExprClose{std::move(operand)}, span});
     }
     return parse_app();
 }
@@ -587,6 +1049,9 @@ bool Parser::starts_atom() const {
         case TokenKind::LParen:
         case TokenKind::LBracket:
         case TokenKind::KwQuote:
+        case TokenKind::KwImport:
+        case TokenKind::KwBreak:
+        case TokenKind::KwContinue:
         case TokenKind::KwBegin:
         case TokenKind::Dollar:
             return true;
@@ -595,14 +1060,39 @@ bool Parser::starts_atom() const {
     }
 }
 
+ExprPtr Parser::parse_postfix() {
+    auto expr = parse_atom();
+    while (check(TokenKind::Dot) || check(TokenKind::Arrow)) {
+        if (match(TokenKind::Dot)) {
+            const Token& field_tok =
+                (check(TokenKind::LowerIdent) || check(TokenKind::UpperIdent))
+                    ? advance()
+                    : expect(TokenKind::LowerIdent, "expected field or member name after '.'");
+            SourceSpan span = SourceSpan::merge(expr->span, field_tok.span);
+            expr = std::make_shared<Expr>(
+                Expr{ExprFieldGet{expr, Ident{field_tok.lexeme, {}, field_tok.span}}, span});
+        } else {
+            advance();  // '->'
+            const Token& field_tok =
+                (check(TokenKind::LowerIdent) || check(TokenKind::UpperIdent))
+                    ? advance()
+                    : expect(TokenKind::LowerIdent, "expected field name after '->'");
+            SourceSpan span = SourceSpan::merge(expr->span, field_tok.span);
+            expr = std::make_shared<Expr>(
+                Expr{ExprPtrFieldGet{expr, Ident{field_tok.lexeme, {}, field_tok.span}}, span});
+        }
+    }
+    return expr;
+}
+
 ExprPtr Parser::parse_app() {
-    auto fn = parse_atom();
+    auto fn = parse_postfix();
     while (starts_atom()) {
         if (expr_delim_depth_ == 0 && top_stmt_col_ > 0 &&
             peek().span.line > previous().span.line && peek().span.column <= top_stmt_col_) {
             break;
         }
-        auto arg = parse_atom();
+        auto arg = parse_postfix();
         SourceSpan span = SourceSpan::merge(fn->span, arg->span);
         fn = std::make_shared<Expr>(Expr{ExprApp{fn, arg}, span});
     }
@@ -626,8 +1116,44 @@ ExprPtr Parser::parse_atom() {
     if (match(TokenKind::KwFalse)) {
         return std::make_shared<Expr>(Expr{ExprBool{false}, tok.span});
     }
+    if (match(TokenKind::KwBreak)) {
+        return std::make_shared<Expr>(Expr{ExprBreak{}, tok.span});
+    }
+    if (match(TokenKind::KwContinue)) {
+        return std::make_shared<Expr>(Expr{ExprContinue{}, tok.span});
+    }
+    if (match(TokenKind::KwImport)) {
+        const Token& ptok = expect(TokenKind::String, "expected module path string after 'import'");
+        return std::make_shared<Expr>(
+            Expr{ExprImport{ptok.str_val}, SourceSpan::merge(tok.span, ptok.span)});
+    }
+    auto parse_struct_lit = [&](Ident id, const SourceSpan& start_span) -> ExprPtr {
+        ++expr_delim_depth_;
+        std::vector<std::pair<Ident, ExprPtr>> fields;
+        if (!check(TokenKind::RBrace)) {
+            while (!check(TokenKind::RBrace) && !at_end()) {
+                match(TokenKind::Dot);
+                const Token& fn_tok =
+                    expect(TokenKind::LowerIdent, "expected field name in struct literal");
+                expect(TokenKind::Eq, "expected '=' after struct field name");
+                ExprPtr fv = parse_expr();
+                fields.emplace_back(Ident{fn_tok.lexeme, {}, fn_tok.span}, std::move(fv));
+                if (!match(TokenKind::Comma) && !match(TokenKind::Semicolon)) {
+                    if (!check(TokenKind::Dot) && !check(TokenKind::LowerIdent)) break;
+                }
+            }
+        }
+        --expr_delim_depth_;
+        const Token& rb = expect(TokenKind::RBrace, "expected '}' after struct literal");
+        return std::make_shared<Expr>(
+            Expr{ExprStructLit{std::move(id), std::move(fields)},
+                 SourceSpan::merge(start_span, rb.span)});
+    };
     if (match(TokenKind::LowerIdent)) {
         Ident id{tok.lexeme, {}, tok.span};
+        if (match(TokenKind::LBrace)) {
+            return parse_struct_lit(std::move(id), tok.span);
+        }
         if (match(TokenKind::Bang)) {
             expect(TokenKind::LParen, "expected '(' after '!' in macro call");
             std::vector<ExprPtr> args;
@@ -644,8 +1170,11 @@ ExprPtr Parser::parse_atom() {
         return std::make_shared<Expr>(Expr{ExprVar{std::move(id)}, tok.span});
     }
     if (match(TokenKind::UpperIdent)) {
-        return std::make_shared<Expr>(
-            Expr{ExprCtor{Ident{tok.lexeme, {}, tok.span}}, tok.span});
+        Ident id{tok.lexeme, {}, tok.span};
+        if (match(TokenKind::LBrace)) {
+            return parse_struct_lit(std::move(id), tok.span);
+        }
+        return std::make_shared<Expr>(Expr{ExprCtor{std::move(id)}, tok.span});
     }
     if (match(TokenKind::KwQuote)) {
         expect(TokenKind::LBrace, "expected '{' after 'quote'");

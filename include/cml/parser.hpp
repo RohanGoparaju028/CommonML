@@ -30,10 +30,15 @@ private:
     const Token& expect(TokenKind kind, const std::string& msg);
     [[noreturn]] void error(const Token& tok, const std::string& msg) const;
 
-    StmtPtr parse_stmt();
+    StmtPtr parse_stmt(bool in_block = false);
     StmtPtr parse_type_decl();
-    StmtPtr parse_let_stmt();
+    StmtPtr parse_struct_decl();
+    StmtPtr parse_struct_body(const SourceSpan& start_span, const Ident& struct_name,
+                              std::vector<Ident> type_params);
+    StmtPtr parse_let_stmt(bool in_block = false);
+    StmtPtr parse_var_stmt();
     StmtPtr parse_macro_stmt();
+    StmtPtr parse_assign_or_expr();
 
     TypeExprPtr parse_type();
     TypeExprPtr parse_type_tuple();
@@ -49,22 +54,31 @@ private:
     Param parse_param();
 
     ExprPtr parse_expr();
+    ExprPtr parse_block();
+    ExprPtr parse_block_or_expr();
     ExprPtr parse_seq_expr();
     ExprPtr parse_let_expr();
     ExprPtr parse_fn_expr();
     ExprPtr parse_if_expr();
     ExprPtr parse_match_expr();
+    ExprPtr parse_while_expr();
+    ExprPtr parse_for_expr();
     ExprPtr parse_binary(int min_prec);
     ExprPtr parse_unary();
     ExprPtr parse_app();
+    ExprPtr parse_postfix();
     ExprPtr parse_atom();
     bool starts_atom() const;
+    bool starts_indented_block() const;
+    void skip_stmt_seps();
 
     std::vector<Token> tokens_;
     size_t pos_ = 0;
     int quote_depth_ = 0;
     size_t top_stmt_col_ = 0;
     int expr_delim_depth_ = 0;
+    bool stop_at_pipe_ = false;
+    int match_arm_delim_depth_ = 0;
 };
 
 }  // namespace cml

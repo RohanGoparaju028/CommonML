@@ -55,12 +55,21 @@ TypePtr string_type();
 TypePtr unit_type();
 TypePtr ast_type();
 TypePtr list_type(TypePtr elem);
+TypePtr vector_type(TypePtr elem);
+TypePtr dict_type(TypePtr key, TypePtr val);
+TypePtr set_type(TypePtr elem);
+TypePtr ptr_type(TypePtr inner);
+
+bool is_int_type_name(const std::string& name);
+bool is_float_type_name(const std::string& name);
 
 TypePtr apply_subst(const Subst& s, const TypePtr& t);
 TypeScheme apply_subst_scheme(const Subst& s, const TypeScheme& scheme);
 Subst compose_subst(const Subst& outer, const Subst& inner);
 
 void collect_free_tvars(const TypePtr& t, std::set<uint32_t>& out);
+void collect_free_tvars_scheme_resolved(const TypeScheme& scheme, const Subst& s,
+                                        std::set<uint32_t>& out);
 std::set<uint32_t> free_tvars(const TypePtr& t);
 std::set<uint32_t> free_tvars_scheme(const TypeScheme& scheme);
 

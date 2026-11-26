@@ -4,6 +4,7 @@
 #include "cml/bytecode.hpp"
 #include "cml/typecheck.hpp"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -13,17 +14,22 @@ namespace cml {
 
 class Compiler {
 public:
+    using ModuleGlobalIdFn =
+        std::function<std::string(const std::string& path, const SourceSpan& span)>;
+
     explicit Compiler(const std::unordered_map<std::string, CtorInfo>* ctors = nullptr);
 
     void set_ctors(const std::unordered_map<std::string, CtorInfo>* ctors) { ctors_ = ctors; }
+    void set_module_resolver(ModuleGlobalIdFn fn) { module_resolver_ = std::move(fn); }
 
-    // Compile a whole program into a top-level FunctionProto.
     std::shared_ptr<FunctionProto> compile_program(const Program& prog);
+    std::shared_ptr<FunctionProto> compile_program_with_modules(
+        const Program& prog,
+        const std::vector<std::pair<std::string, std::shared_ptr<FunctionProto>>>& module_inits);
+    std::shared_ptr<FunctionProto> compile_module_program(
+        const Program& prog, const std::vector<std::string>& export_names);
 
-    // Compile a single statement (for REPL / incremental execution).
     std::shared_ptr<FunctionProto> compile_stmt(const StmtPtr& stmt);
-
-    // Compile a standalone expression (returns its value).
     std::shared_ptr<FunctionProto> compile_expr(const ExprPtr& expr,
                                                 const std::vector<Ident>& params = {});
 
@@ -34,12 +40,24 @@ private:
         bool is_captured = false;
     };
 
+    struct DeferFrame {
+        std::vector<ExprPtr> actions;
+    };
+
     struct FnState {
         std::shared_ptr<FunctionProto> proto;
         FnState* enclosing = nullptr;
         std::vector<LocalVar> locals;
         std::vector<UpvalueDesc> upvalues;
+        std::vector<DeferFrame> defer_frames;
         uint32_t max_locals = 0;
+    };
+
+    struct LoopContext {
+        size_t local_mark = 0;
+        size_t defer_depth = 0;
+        std::vector<size_t> break_jumps;
+        std::vector<size_t> continue_jumps;
     };
 
     // State & scope management (src/codegen/compiler_state.cpp)
@@ -54,6 +72,8 @@ private:
     size_t emit_jump(OpCode op, const SourceSpan& span = {});
     void patch_jump(size_t idx);
     void pop_locals_to(size_t count, const SourceSpan& span);
+    void emit_defer_actions(const std::vector<ExprPtr>& actions, const SourceSpan& span);
+    void emit_defers_down_to(size_t target_depth, const SourceSpan& span);
 
     // Pattern compilation (src/codegen/compiler_pat.cpp)
     // Expects scrutinee on top of stack; binds matched vars and pops scrutinee on success.
@@ -73,6 +93,8 @@ private:
 
     FnState* current_ = nullptr;
     const std::unordered_map<std::string, CtorInfo>* ctors_ = nullptr;
+    ModuleGlobalIdFn module_resolver_;
+    std::vector<LoopContext> loop_stack_;
 };
 
 }  // namespace cml

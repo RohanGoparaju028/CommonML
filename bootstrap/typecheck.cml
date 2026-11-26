@@ -1,0 +1,530 @@
+-- Bootstrap CommonML Hindley-Milner Type Checker written in CommonML
+let core = import "std/core"
+let prs = import "parser.cml"
+
+type BTy =
+  | BTInt
+  | BTFixed String
+  | BTIntLit Int
+  | BTFloat
+  | BTFixedFloat String
+  | BTBool
+  | BTString
+  | BTUnit
+  | BTVar Int
+  | BTList BTy
+  | BTTuple (List BTy)
+  | BTFun BTy BTy
+  | BTPtr BTy
+  | BTAdt String
+
+type BScheme = BSch (List Int) BTy
+
+let is_fixed_int_name nm =
+  (nm == "i8" || nm == "i16" || nm == "i32" || nm == "i64" || nm == "isize" ||
+   nm == "u8" || nm == "u16" || nm == "u32" || nm == "u64" || nm == "usize")
+
+let is_fixed_float_name nm = nm == "f32" || nm == "f64"
+
+let rec ty_to_str t =
+  match t with
+  | BTInt -> "Int"
+  | BTFixed nm -> nm
+  | BTIntLit _ -> "Int"
+  | BTFloat -> "Float"
+  | BTFixedFloat nm -> nm
+  | BTBool -> "Bool"
+  | BTString -> "String"
+  | BTUnit -> "Unit"
+  | BTVar id -> "'t" ++ to_string id
+  | BTList inner -> "List (" ++ ty_to_str inner ++ ")"
+  | BTTuple elems ->
+      let parts = core.list_map ty_to_str elems in
+      "(" ++ str_concat_list (
+        let rec join i acc =
+          if i >= list_len parts then list_rev acc
+          else if i == 0 then join 1 (list_nth parts 0 :: acc)
+          else join (i + 1) (list_nth parts i :: " * " :: acc)
+        in join 0 []
+      ) ++ ")"
+  | BTFun a b -> "(" ++ ty_to_str a ++ " -> " ++ ty_to_str b ++ ")"
+  | BTPtr inner -> "*" ++ ty_to_str inner
+  | BTAdt nm -> nm
+
+let rec subst_lookup subst id =
+  match subst with
+  | [] -> None
+  | (k, v) :: rest -> if k == id then Some v else subst_lookup rest id
+
+let rec apply_ty subst t =
+  match t with
+  | BTVar id ->
+      (match subst_lookup subst id with
+      | None -> t
+      | Some t2 -> apply_ty subst t2)
+  | BTIntLit id ->
+      (match subst_lookup subst id with
+      | None -> t
+      | Some t2 -> apply_ty subst t2)
+  | BTList inner -> BTList (apply_ty subst inner)
+  | BTTuple elems -> BTTuple (core.list_map (apply_ty subst) elems)
+  | BTFun a b -> BTFun (apply_ty subst a) (apply_ty subst b)
+  | BTPtr inner -> BTPtr (apply_ty subst inner)
+  | _ -> t
+
+let rec occurs subst id t =
+  match apply_ty subst t with
+  | BTVar id2 -> id == id2
+  | BTList inner -> occurs subst id inner
+  | BTTuple elems -> core.list_any (occurs subst id) elems
+  | BTFun a b -> occurs subst id a || occurs subst id b
+  | BTPtr inner -> occurs subst id inner
+  | _ -> false
+
+let rec unify_ty a b subst =
+  let ra = apply_ty subst a in
+  let rb = apply_ty subst b in
+  match (ra, rb) with
+  | (BTInt, BTInt) -> subst
+  | (BTFixed n1, BTFixed n2) ->
+      if n1 == n2 then subst else panic ("bootstrap type error: cannot unify " ++ n1 ++ " with " ++ n2)
+  | (BTFloat, BTFloat) -> subst
+  | (BTFixedFloat n1, BTFixedFloat n2) ->
+      if n1 == n2 then subst else panic ("bootstrap type error: cannot unify " ++ n1 ++ " with " ++ n2)
+  | (BTBool, BTBool) -> subst
+  | (BTString, BTString) -> subst
+  | (BTUnit, BTUnit) -> subst
+  | (BTAdt n1, BTAdt n2) ->
+      if n1 == n2 then subst
+      else panic ("bootstrap type error: cannot unify " ++ n1 ++ " with " ++ n2)
+  | (BTIntLit id, t) ->
+      (match t with
+      | BTIntLit id2 -> if id == id2 then subst else (id, t) :: subst
+      | BTInt -> (id, t) :: subst
+      | BTFixed _ -> (id, t) :: subst
+      | BTVar id2 -> (id2, ra) :: subst
+      | _ -> panic ("bootstrap type error: cannot unify Int literal with " ++ ty_to_str t))
+  | (t, BTIntLit id) ->
+      (match t with
+      | BTInt -> (id, t) :: subst
+      | BTFixed _ -> (id, t) :: subst
+      | BTVar id2 -> (id2, rb) :: subst
+      | _ -> panic ("bootstrap type error: cannot unify " ++ ty_to_str t ++ " with Int literal"))
+  | (BTVar id, t) ->
+      (match t with
+      | BTVar id2 -> if id == id2 then subst else (id, t) :: subst
+      | _ ->
+          if occurs subst id t then panic "bootstrap type error: occurs check failed"
+          else (id, t) :: subst)
+  | (t, BTVar id) ->
+      if occurs subst id t then panic "bootstrap type error: occurs check failed"
+      else (id, t) :: subst
+  | (BTList x, BTList y) -> unify_ty x y subst
+  | (BTPtr x, BTPtr y) -> unify_ty x y subst
+  | (BTFun a1 b1, BTFun a2 b2) ->
+      let s1 = unify_ty a1 a2 subst in
+      unify_ty b1 b2 s1
+  | (BTTuple xs, BTTuple ys) ->
+      if list_len xs != list_len ys then panic "bootstrap type error: tuple arity mismatch"
+      else
+        let rec go i s =
+          if i >= list_len xs then s
+          else go (i + 1) (unify_ty (list_nth xs i) (list_nth ys i) s)
+        in
+        go 0 subst
+  | _ ->
+      panic ("bootstrap type error: mismatch between " ++ ty_to_str ra ++ " and " ++ ty_to_str rb)
+
+let rec free_vars subst t =
+  match apply_ty subst t with
+  | BTVar id -> [id]
+  | BTList inner -> free_vars subst inner
+  | BTTuple elems -> core.list_foldl (fn acc e -> list_append acc (free_vars subst e)) [] elems
+  | BTFun a b -> list_append (free_vars subst a) (free_vars subst b)
+  | BTPtr inner -> free_vars subst inner
+  | _ -> []
+
+let env_lookup name env =
+  core.list_find (fn kv -> match kv with | (k, _) -> k == name) env
+
+let env_free_vars subst env =
+  core.list_foldl (fn acc kv ->
+    match kv with
+    | (_, BSch qvars t) ->
+        let fv = core.list_filter (fn id -> not (core.list_any (fn q -> q == id) qvars)) (free_vars subst t) in
+        list_append acc fv
+  ) [] env
+
+let generalize env subst t =
+  let rt = apply_ty subst t in
+  let efv = env_free_vars subst env in
+  let fv = free_vars subst rt in
+  let q = core.list_filter (fn id -> not (core.list_any (fn e -> e == id) efv)) fv in
+  BSch q rt
+
+let instantiate sch next_id =
+  match sch with
+  | BSch qvars t ->
+      let rec mk_map i nid acc =
+        if i >= list_len qvars then (acc, nid)
+        else mk_map (i + 1) (nid + 1) ((list_nth qvars i, BTVar nid) :: acc)
+      in
+      let (s, nid2) = mk_map 0 next_id [] in
+      (apply_ty s t, nid2)
+
+let rec infer_pat pat env ctors subst nid =
+  match pat with
+  | PWild -> (BTVar nid, [], subst, nid + 1)
+  | PVar nm ->
+      let tv = BTVar nid in
+      (tv, [(nm, tv)], subst, nid + 1)
+  | PInt _ -> (BTInt, [], subst, nid)
+  | PFloat _ -> (BTFloat, [], subst, nid)
+  | PBool _ -> (BTBool, [], subst, nid)
+  | PString _ -> (BTString, [], subst, nid)
+  | PUnit -> (BTUnit, [], subst, nid)
+  | PTuple elems ->
+      let rec go i ts bs s n =
+        if i >= list_len elems then (BTTuple (list_rev ts), bs, s, n)
+        else
+          let (t1, b1, s1, n1) = infer_pat (list_nth elems i) env ctors s n in
+          go (i + 1) (t1 :: ts) (list_append bs b1) s1 n1
+      in
+      go 0 [] [] subst nid
+  | PList elems ->
+      let el_ty = BTVar nid in
+      let rec go i bs s n =
+        if i >= list_len elems then (BTList el_ty, bs, s, n)
+        else
+          let (t1, b1, s1, n1) = infer_pat (list_nth elems i) env ctors s n in
+          let s2 = unify_ty el_ty t1 s1 in
+          go (i + 1) (list_append bs b1) s2 n1
+      in
+      go 0 [] subst (nid + 1)
+  | PCons hd tl ->
+      let (th, bh, s1, n1) = infer_pat hd env ctors subst nid in
+      let (tt, bt, s2, n2) = infer_pat tl env ctors s1 n1 in
+      let s3 = unify_ty (BTList th) tt s2 in
+      (apply_ty s3 tt, list_append bh bt, s3, n2)
+  | PCtor cname args ->
+      match env_lookup cname ctors with
+      | None -> panic ("bootstrap type error: unknown constructor '" ++ cname ++ "'")
+      | Some (_, sch) ->
+          let (cty, n1) = instantiate sch nid in
+          let rec apply_args i cur_ty bs s n =
+            if i >= list_len args then (apply_ty s cur_ty, bs, s, n)
+            else
+              let (pa_ty, pa_bs, s1, n2) = infer_pat (list_nth args i) env ctors s n in
+              let res_ty = BTVar n2 in
+              let s2 = unify_ty cur_ty (BTFun pa_ty res_ty) s1 in
+              apply_args (i + 1) (apply_ty s2 res_ty) (list_append bs pa_bs) s2 (n2 + 1)
+          in
+          apply_args 0 cty [] subst n1
+
+let rec resolve_te te structs =
+  match te with
+  | TEPtr inner -> BTPtr (resolve_te inner structs)
+  | TEFun a b -> BTFun (resolve_te a structs) (resolve_te b structs)
+  | TETuple elems -> BTTuple (core.list_map (fn e -> resolve_te e structs) elems)
+  | TECon nm args ->
+      if nm == "Int" || nm == "int" then BTInt
+      else if is_fixed_int_name nm then BTFixed nm
+      else if nm == "Float" || nm == "float" then BTFloat
+      else if is_fixed_float_name nm then BTFixedFloat nm
+      else if nm == "Bool" || nm == "bool" then BTBool
+      else if nm == "String" || nm == "str" || nm == "string" then BTString
+      else if nm == "Unit" || nm == "unit" || nm == "void" then BTUnit
+      else if nm == "List" && list_len args == 1 then BTList (resolve_te (list_nth args 0) structs)
+      else if nm == "Ptr" && list_len args == 1 then BTPtr (resolve_te (list_nth args 0) structs)
+      else BTAdt nm
+
+let ensure_int_ty t subst nid =
+  let r = apply_ty subst t in
+  match r with
+  | BTInt -> (BTInt, subst, nid)
+  | BTFixed _ -> (r, subst, nid)
+  | BTIntLit _ -> (r, subst, nid)
+  | BTVar id ->
+      let lit = BTIntLit nid in
+      (lit, (id, lit) :: subst, nid + 1)
+  | _ -> panic ("bootstrap type error: expected integer type, got " ++ ty_to_str r)
+
+let ensure_float_ty t subst =
+  let r = apply_ty subst t in
+  match r with
+  | BTFloat -> (BTFloat, subst)
+  | BTFixedFloat _ -> (r, subst)
+  | BTVar id -> (BTFloat, (id, BTFloat) :: subst)
+  | _ -> panic ("bootstrap type error: expected float type, got " ++ ty_to_str r)
+
+let lookup_struct_field sname fname structs =
+  match env_lookup sname structs with
+  | None -> panic ("bootstrap type error: unknown struct '" ++ sname ++ "'")
+  | Some (_, fields) ->
+      match core.list_find (fn kv -> match kv with | (k, _) -> k == fname) fields with
+      | None -> panic ("bootstrap type error: struct '" ++ sname ++ "' has no field '" ++ fname ++ "'")
+      | Some (_, ft) -> ft
+
+let rec infer_expr expr env ctors structs subst nid =
+  match expr with
+  | EInt _ -> (BTIntLit nid, subst, nid + 1)
+  | EFloat _ -> (BTFloat, subst, nid)
+  | EBool _ -> (BTBool, subst, nid)
+  | EString _ -> (BTString, subst, nid)
+  | EUnit -> (BTUnit, subst, nid)
+  | EVar nm ->
+      (match env_lookup nm env with
+      | None -> panic ("bootstrap type error: unbound variable '" ++ nm ++ "'")
+      | Some (_, sch) ->
+          let (t, n1) = instantiate sch nid in
+          (t, subst, n1))
+  | ECtor cname ->
+      (match env_lookup cname ctors with
+      | None -> panic ("bootstrap type error: unknown constructor '" ++ cname ++ "'")
+      | Some (_, sch) ->
+          let (t, n1) = instantiate sch nid in
+          (t, subst, n1))
+  | ETuple elems ->
+      let rec go i ts s n =
+        if i >= list_len elems then (BTTuple (list_rev ts), s, n)
+        else
+          let (t1, s1, n1) = infer_expr (list_nth elems i) env ctors structs s n in
+          go (i + 1) (t1 :: ts) s1 n1
+      in
+      go 0 [] subst nid
+  | EList elems ->
+      let el_ty = BTVar nid in
+      let rec go i s n =
+        if i >= list_len elems then (BTList (apply_ty s el_ty), s, n)
+        else
+          let (t1, s1, n1) = infer_expr (list_nth elems i) env ctors structs s n in
+          let s2 = unify_ty el_ty t1 s1 in
+          go (i + 1) s2 n1
+      in
+      go 0 subst (nid + 1)
+  | EUnary op e ->
+      let (t1, s1, n1) = infer_expr e env ctors structs subst nid in
+      (match op with
+      | UNegInt -> ensure_int_ty t1 s1 n1
+      | UBitNot -> ensure_int_ty t1 s1 n1
+      | UNegFloat ->
+          let (ft, s2) = ensure_float_ty t1 s1 in
+          (ft, s2, n1)
+      | ULogicalNot -> (BTBool, unify_ty t1 BTBool s1, n1)
+      | UAddrOf -> (BTPtr (apply_ty s1 t1), s1, n1)
+      | UDeref ->
+          let inner = BTVar n1 in
+          let s2 = unify_ty t1 (BTPtr inner) s1 in
+          (apply_ty s2 inner, s2, n1 + 1))
+  | EBin op l r ->
+      let (tl, s1, n1) = infer_expr l env ctors structs subst nid in
+      let (tr, s2, n2) = infer_expr r env ctors structs s1 n1 in
+      (match op with
+      | BAddInt -> let s3 = unify_ty tl tr s2 in ensure_int_ty tl s3 n2
+      | BSubInt -> let s3 = unify_ty tl tr s2 in ensure_int_ty tl s3 n2
+      | BMulInt -> let s3 = unify_ty tl tr s2 in ensure_int_ty tl s3 n2
+      | BDivInt -> let s3 = unify_ty tl tr s2 in ensure_int_ty tl s3 n2
+      | BModInt -> let s3 = unify_ty tl tr s2 in ensure_int_ty tl s3 n2
+      | BBitAnd -> let s3 = unify_ty tl tr s2 in ensure_int_ty tl s3 n2
+      | BBitOr -> let s3 = unify_ty tl tr s2 in ensure_int_ty tl s3 n2
+      | BBitXor -> let s3 = unify_ty tl tr s2 in ensure_int_ty tl s3 n2
+      | BShl -> let s3 = unify_ty tl tr s2 in ensure_int_ty tl s3 n2
+      | BShr -> let s3 = unify_ty tl tr s2 in ensure_int_ty tl s3 n2
+      | BAddFloat -> let (ft, s3) = ensure_float_ty tl (unify_ty tl tr s2) in (ft, s3, n2)
+      | BSubFloat -> let (ft, s3) = ensure_float_ty tl (unify_ty tl tr s2) in (ft, s3, n2)
+      | BMulFloat -> let (ft, s3) = ensure_float_ty tl (unify_ty tl tr s2) in (ft, s3, n2)
+      | BDivFloat -> let (ft, s3) = ensure_float_ty tl (unify_ty tl tr s2) in (ft, s3, n2)
+      | BConcat -> (BTString, unify_ty tr BTString (unify_ty tl BTString s2), n2)
+      | BCons -> (apply_ty (unify_ty (BTList tl) tr s2) tr, unify_ty (BTList tl) tr s2, n2)
+      | BEq -> (BTBool, unify_ty tl tr s2, n2)
+      | BNeq -> (BTBool, unify_ty tl tr s2, n2)
+      | BLt -> (BTBool, unify_ty tl tr s2, n2)
+      | BLe -> (BTBool, unify_ty tl tr s2, n2)
+      | BGt -> (BTBool, unify_ty tl tr s2, n2)
+      | BGe -> (BTBool, unify_ty tl tr s2, n2)
+      | BAnd -> (BTBool, unify_ty tr BTBool (unify_ty tl BTBool s2), n2)
+      | BOr -> (BTBool, unify_ty tr BTBool (unify_ty tl BTBool s2), n2)
+      | BPipe ->
+          let res_tv = BTVar n2 in
+          let s3 = unify_ty tr (BTFun tl res_tv) s2 in
+          (apply_ty s3 res_tv, s3, n2 + 1)
+      | BSeq -> (apply_ty s2 tr, s2, n2))
+  | EIf c t e ->
+      let (tc, s1, n1) = infer_expr c env ctors structs subst nid in
+      let s2 = unify_ty tc BTBool s1 in
+      let (tt, s3, n2) = infer_expr t env ctors structs s2 n1 in
+      let (te, s4, n3) = infer_expr e env ctors structs s3 n2 in
+      let s5 = unify_ty tt te s4 in
+      (apply_ty s5 tt, s5, n3)
+  | EFn pat body ->
+      let (pt, bs, s1, n1) = infer_pat pat env ctors subst nid in
+      let env2 = list_append (core.list_map (fn kv -> match kv with | (k, v) -> (k, BSch [] v)) bs) env in
+      let (bt, s2, n2) = infer_expr body env2 ctors structs s1 n1 in
+      (BTFun (apply_ty s2 pt) bt, s2, n2)
+  | EApp f a ->
+      let (tf, s1, n1) = infer_expr f env ctors structs subst nid in
+      let (ta, s2, n2) = infer_expr a env ctors structs s1 n1 in
+      let rv = BTVar n2 in
+      let s3 = unify_ty tf (BTFun ta rv) s2 in
+      (apply_ty s3 rv, s3, n2 + 1)
+  | ELet is_rec pat val_e body ->
+      if is_rec then
+        let nm = match pat with | PVar s -> s | _ -> panic "let rec requires var" in
+        let rec_tv = BTVar nid in
+        let env_r = (nm, BSch [] rec_tv) :: env in
+        let (tv, s1, n1) = infer_expr val_e env_r ctors structs subst (nid + 1) in
+        let s2 = unify_ty rec_tv tv s1 in
+        let sch = generalize env s2 (apply_ty s2 rec_tv) in
+        infer_expr body ((nm, sch) :: env) ctors structs s2 n1
+      else
+        let (tv, s1, n1) = infer_expr val_e env ctors structs subst nid in
+        let (tp, bs, s2, n2) = infer_pat pat env ctors s1 n1 in
+        let s3 = unify_ty tp tv s2 in
+        let bs_sch = core.list_map (fn kv -> match kv with | (k, v) -> (k, generalize env s3 v)) bs in
+        infer_expr body (list_append bs_sch env) ctors structs s3 n2
+  | EMatch scrut arms ->
+      let (ts, s1, n1) = infer_expr scrut env ctors structs subst nid in
+      let res_tv = BTVar n1 in
+      let rec go i s n =
+        if i >= list_len arms then (apply_ty s res_tv, s, n)
+        else
+          let (p, b) = list_nth arms i in
+          let (tp, bs, s2, n2) = infer_pat p env ctors s n in
+          let s3 = unify_ty ts tp s2 in
+          let env_arm = list_append (core.list_map (fn kv -> match kv with | (k, v) -> (k, BSch [] v)) bs) env in
+          let (tb, s4, n3) = infer_expr b env_arm ctors structs s3 n2 in
+          let s5 = unify_ty res_tv tb s4 in
+          go (i + 1) s5 n3
+      in
+      go 0 s1 (n1 + 1)
+  | EAnnot e te ->
+      let (t1, s1, n1) = infer_expr e env ctors structs subst nid in
+      let target = resolve_te te structs in
+      let s2 = unify_ty t1 target s1 in
+      (apply_ty s2 target, s2, n1)
+  | EStructLit sname fields ->
+      let rec go i s n =
+        if i >= list_len fields then (BTAdt sname, s, n)
+        else
+          let (fnm, fv) = list_nth fields i in
+          let fty = lookup_struct_field sname fnm structs in
+          let (vt, s1, n1) = infer_expr fv env ctors structs s n in
+          go (i + 1) (unify_ty vt fty s1) n1
+      in
+      go 0 subst nid
+  | EFieldGet obj fld ->
+      let (ot, s1, n1) = infer_expr obj env ctors structs subst nid in
+      let rot = apply_ty s1 ot in
+      (match rot with
+      | BTAdt sname -> (lookup_struct_field sname fld structs, s1, n1)
+      | _ -> panic ("bootstrap type error: cannot access field '" ++ fld ++ "' with '.' on " ++ ty_to_str rot))
+  | EFieldSet obj fld val_e ->
+      let (ot, s1, n1) = infer_expr obj env ctors structs subst nid in
+      let rot = apply_ty s1 ot in
+      let fty =
+        match rot with
+        | BTAdt sname -> lookup_struct_field sname fld structs
+        | _ -> panic ("bootstrap type error: cannot assign field '" ++ fld ++ "' with '.' on " ++ ty_to_str rot)
+      in
+      let (vt, s2, n2) = infer_expr val_e env ctors structs s1 n1 in
+      (BTUnit, unify_ty vt fty s2, n2)
+  | ENew val_e ->
+      let (vt, s1, n1) = infer_expr val_e env ctors structs subst nid in
+      (BTPtr (apply_ty s1 vt), s1, n1)
+  | EClose ptr_e ->
+      let (pt, s1, n1) = infer_expr ptr_e env ctors structs subst nid in
+      let inner = BTVar n1 in
+      (BTUnit, unify_ty pt (BTPtr inner) s1, n1 + 1)
+  | EScopeDefer act body ->
+      let (_, s1, n1) = infer_expr act env ctors structs subst nid in
+      infer_expr body env ctors structs s1 n1
+  | EDerefSet ptr_e val_e ->
+      let (pt, s1, n1) = infer_expr ptr_e env ctors structs subst nid in
+      let (vt, s2, n2) = infer_expr val_e env ctors structs s1 n1 in
+      (BTUnit, unify_ty pt (BTPtr vt) s2, n2)
+  | EPtrFieldGet ptr_e fld ->
+      let (pt, s1, n1) = infer_expr ptr_e env ctors structs subst nid in
+      let inner = BTVar n1 in
+      let s2 = unify_ty pt (BTPtr inner) s1 in
+      (match apply_ty s2 inner with
+      | BTAdt sname -> (lookup_struct_field sname fld structs, s2, n1 + 1)
+      | other -> panic ("bootstrap type error: cannot access '->" ++ fld ++ "' on " ++ ty_to_str other))
+  | EPtrFieldSet ptr_e fld val_e ->
+      let (pt, s1, n1) = infer_expr ptr_e env ctors structs subst nid in
+      let inner = BTVar n1 in
+      let s2 = unify_ty pt (BTPtr inner) s1 in
+      let fty =
+        match apply_ty s2 inner with
+        | BTAdt sname -> lookup_struct_field sname fld structs
+        | other -> panic ("bootstrap type error: cannot assign '->" ++ fld ++ "' on " ++ ty_to_str other)
+      in
+      let (vt, s3, n2) = infer_expr val_e env ctors structs s2 (n1 + 1) in
+      (BTUnit, unify_ty vt fty s3, n2)
+
+let default_type_env =
+  [
+    ("print", BSch [0] (BTFun (BTVar 0) BTUnit)),
+    ("println", BSch [0] (BTFun (BTVar 0) BTUnit)),
+    ("to_string", BSch [0] (BTFun (BTVar 0) BTString)),
+    ("not", BSch [] (BTFun BTBool BTBool)),
+    ("abs", BSch [] (BTFun BTInt BTInt)),
+    ("int_of_float", BSch [] (BTFun BTFloat BTInt)),
+    ("float_of_int", BSch [] (BTFun BTInt BTFloat)),
+    ("str_len", BSch [] (BTFun BTString BTInt)),
+    ("list_len", BSch [0] (BTFun (BTList (BTVar 0)) BTInt)),
+    ("is_empty", BSch [0] (BTFun (BTList (BTVar 0)) BTBool)),
+    ("head", BSch [0] (BTFun (BTList (BTVar 0)) (BTVar 0))),
+    ("tail", BSch [0] (BTFun (BTList (BTVar 0)) (BTList (BTVar 0)))),
+    ("heap_live_count", BSch [] (BTFun BTUnit BTInt)),
+    ("ptr_is_alive", BSch [0] (BTFun (BTPtr (BTVar 0)) BTBool)),
+    ("panic", BSch [0] (BTFun BTString (BTVar 0)))
+  ]
+
+let check_program_stmts stmts =
+  let rec go i env ctors structs subst nid last_ty =
+    if i >= list_len stmts then last_ty
+    else
+      match list_nth stmts i with
+      | SType tname cdefs ->
+          let adt_ty = BTAdt tname in
+          let new_ctors =
+            core.list_map (fn ca ->
+              match ca with
+              | (cname, arity) ->
+                  let rec mk_fn k n_acc =
+                    if k >= arity then n_acc
+                    else mk_fn (k + 1) (BTFun (BTVar (k + 1000)) n_acc)
+                  in
+                  let full_ty = mk_fn 0 adt_ty in
+                  (cname, BSch (core.range 1000 (1000 + arity)) full_ty)
+            ) cdefs
+          in
+          go (i + 1) env (list_append new_ctors ctors) structs subst nid BTUnit
+      | SStruct sname fdecls ->
+          let resolved_fs =
+            core.list_map (fn fv ->
+              match fv with
+              | (fnm, te) -> (fnm, resolve_te te structs)
+            ) fdecls
+          in
+          go (i + 1) env ctors ((sname, resolved_fs) :: structs) subst nid BTUnit
+      | SLet is_rec pat val_e ->
+          if is_rec then
+            let nm = match pat with | PVar s -> s | _ -> panic "let rec requires var" in
+            let rec_tv = BTVar nid in
+            let (tv, s1, n1) = infer_expr val_e ((nm, BSch [] rec_tv) :: env) ctors structs subst (nid + 1) in
+            let s2 = unify_ty rec_tv tv s1 in
+            let rty = apply_ty s2 rec_tv in
+            let sch = generalize env s2 rty in
+            go (i + 1) ((nm, sch) :: env) ctors structs s2 n1 rty
+          else
+            let (tv, s1, n1) = infer_expr val_e env ctors structs subst nid in
+            let (tp, bs, s2, n2) = infer_pat pat env ctors s1 n1 in
+            let s3 = unify_ty tp tv s2 in
+            let bs_sch = core.list_map (fn kv -> match kv with | (k, v) -> (k, generalize env s3 v)) bs in
+            go (i + 1) (list_append bs_sch env) ctors structs s3 n2 (apply_ty s3 tv)
+      | SExpr e ->
+          let (te, s1, n1) = infer_expr e env ctors structs subst nid in
+          go (i + 1) env ctors structs s1 n1 (apply_ty s1 te)
+  in
+  go 0 default_type_env [] [] [] 10 BTUnit

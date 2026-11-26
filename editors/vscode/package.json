@@ -1,0 +1,29 @@
+{
+  "name": "commonml-language",
+  "displayName": "CommonML",
+  "description": "Syntax highlighting and language configuration for CommonML (.cml)",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "commonml",
+        "aliases": ["CommonML", "cml"],
+        "extensions": [".cml"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "commonml",
+        "scopeName": "source.commonml",
+        "path": "./syntaxes/cml.tmLanguage.json"
+      }
+    ]
+  }
+}

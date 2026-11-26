@@ -36,12 +36,29 @@ Value VM::execute_binary_op(OpCode op, const Value& a, const Value& b, const Sou
             if (denom == 0.0) runtime_error("float division by zero", span);
             return Value::make_float(std::get<ValFloat>(a.node).value / denom);
         }
+        case OpCode::BitAnd:
+            return Value::make_int(std::get<ValInt>(a.node).value & std::get<ValInt>(b.node).value);
+        case OpCode::BitOr:
+            return Value::make_int(std::get<ValInt>(a.node).value | std::get<ValInt>(b.node).value);
+        case OpCode::BitXor:
+            return Value::make_int(std::get<ValInt>(a.node).value ^ std::get<ValInt>(b.node).value);
+        case OpCode::Shl: {
+            int64_t sh = std::get<ValInt>(b.node).value;
+            if (sh < 0 || sh >= 64) runtime_error("shift amount out of range [0, 63]", span);
+            return Value::make_int(static_cast<int64_t>(
+                static_cast<uint64_t>(std::get<ValInt>(a.node).value) << sh));
+        }
+        case OpCode::Shr: {
+            int64_t sh = std::get<ValInt>(b.node).value;
+            if (sh < 0 || sh >= 64) runtime_error("shift amount out of range [0, 63]", span);
+            return Value::make_int(std::get<ValInt>(a.node).value >> sh);
+        }
         case OpCode::ConcatStr:
             return Value::make_string(std::get<ValString>(a.node).value +
                                       std::get<ValString>(b.node).value);
         case OpCode::Cons: {
             std::vector<Value> elems;
-            const auto& tail = std::get<ValList>(b.node).elems;
+            const auto& tail = std::get<ValList>(b.node).ptr->elems;
             elems.reserve(1 + tail.size());
             elems.push_back(a);
             elems.insert(elems.end(), tail.begin(), tail.end());
@@ -82,11 +99,11 @@ static ExprPtr value_to_ast_expr(const Value& v, const SourceSpan& span) {
                 return std::make_shared<Expr>(Expr{ExprUnit{}, span});
             } else if constexpr (std::is_same_v<T, ValTuple>) {
                 std::vector<ExprPtr> elems;
-                for (const auto& e : n.elems) elems.push_back(value_to_ast_expr(e, span));
+                for (const auto& e : n.ptr->elems) elems.push_back(value_to_ast_expr(e, span));
                 return std::make_shared<Expr>(Expr{ExprTuple{std::move(elems)}, span});
             } else if constexpr (std::is_same_v<T, ValList>) {
                 std::vector<ExprPtr> elems;
-                for (const auto& e : n.elems) elems.push_back(value_to_ast_expr(e, span));
+                for (const auto& e : n.ptr->elems) elems.push_back(value_to_ast_expr(e, span));
                 return std::make_shared<Expr>(Expr{ExprList{std::move(elems)}, span});
             } else {
                 throw CompileError(Diagnostic{

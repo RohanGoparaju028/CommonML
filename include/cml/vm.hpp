@@ -11,12 +11,6 @@
 
 namespace cml {
 
-struct UpvalueObj {
-    size_t stack_index = 0;
-    Value closed;
-    bool is_closed = false;
-};
-
 class VM {
 public:
     VM();
@@ -38,8 +32,11 @@ private:
     };
 
     Value execute();
-    std::shared_ptr<UpvalueObj> capture_upvalue(size_t stack_slot);
+    Rc<UpvalueObj> capture_upvalue(size_t stack_slot);
     void close_upvalues(size_t from_slot);
+    void invalidate_stack_ptrs(size_t from_slot);
+    const Value& read_ptr_cell(const Rc<HeapCell>& cell, const SourceSpan& span) const;
+    void write_ptr_cell(const Rc<HeapCell>& cell, Value val, const SourceSpan& span);
     void call_into_frame(const Value& callee, size_t arg_count, bool tail_call,
                          const SourceSpan& span);
     Value execute_binary_op(OpCode op, const Value& a, const Value& b, const SourceSpan& span);
@@ -49,7 +46,8 @@ private:
 
     std::vector<Value> stack_;
     std::vector<CallFrame> frames_;
-    std::vector<std::shared_ptr<UpvalueObj>> open_upvalues_;
+    std::vector<Rc<UpvalueObj>> open_upvalues_;
+    std::vector<Rc<HeapCell>> open_stack_ptrs_;
     std::unordered_map<std::string, Value> globals_;
 };
 

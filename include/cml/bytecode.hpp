@@ -26,6 +26,8 @@ enum class OpCode : uint8_t {
 
     NegInt,
     NegFloat,
+    BitNot,
+    LogicalNot,
     AddInt,
     SubInt,
     MulInt,
@@ -35,6 +37,11 @@ enum class OpCode : uint8_t {
     SubFloat,
     MulFloat,
     DivFloat,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
     ConcatStr,
     Cons,
 
@@ -48,6 +55,18 @@ enum class OpCode : uint8_t {
     MakeTuple,
     MakeList,
     MakeAdt,
+    MakeStruct,
+    GetField,
+    SetField,
+    NewHeap,
+    CloseHeap,
+    DerefPtr,
+    SetDeref,
+    GetPtrField,
+    SetPtrField,
+    AddrOfLocal,
+    AddrOfGlobal,
+    IterItems,
     MakeClosure,
     MakeQuote,
 
@@ -116,6 +135,21 @@ struct FunctionProto {
 };
 
 const char* opcode_name(OpCode op);
+OpCode opcode_from_name(const std::string& name);
 std::string disassemble_chunk(const Chunk& chunk, const std::string& title = "<script>");
+
+struct BytecodeCtor {
+    std::string name;
+    uint32_t tag = 0;
+    size_t arity = 0;
+};
+
+struct BytecodeProgram {
+    std::vector<BytecodeCtor> ctors;
+    std::shared_ptr<FunctionProto> entry;
+};
+
+std::string serialize_bytecode(const BytecodeProgram& prog);
+BytecodeProgram deserialize_bytecode(const std::string& data);
 
 }  // namespace cml

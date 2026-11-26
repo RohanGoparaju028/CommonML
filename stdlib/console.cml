@@ -1,0 +1,31 @@
+-- CommonML Console Application Library
+let core = import "std/core"
+
+let print_sep _ = println "----------------------------------------"
+
+let banner title =
+  print_sep ()
+  println ("  " ++ title)
+  print_sep ()
+
+let prompt msg =
+  print msg
+  read_line ()
+
+let rec prompt_int msg =
+  let line = str_trim (prompt msg)
+  if is_valid_int line then int_of_string line
+  else
+    println "Please enter a valid integer."
+    prompt_int msg
+
+let confirm msg =
+  let ans = str_lower (str_trim (prompt (msg ++ " [y/N]: ")))
+  ans == "y" || ans == "yes"
+
+let arg_or idx fallback =
+  let args = cli_args ()
+  if idx >= 0 && idx < list_len args then list_nth args idx else fallback
+
+let has_flag flag =
+  core.list_any (fn a -> a == flag) (cli_args ())

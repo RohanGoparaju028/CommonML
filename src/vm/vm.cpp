@@ -38,13 +38,13 @@ void VM::runtime_error(const std::string& msg, const SourceSpan& span) const {
     throw CompileError(Diagnostic{"runtime", msg, span});
 }
 
-std::shared_ptr<UpvalueObj> VM::capture_upvalue(size_t stack_slot) {
+Rc<UpvalueObj> VM::capture_upvalue(size_t stack_slot) {
     for (const auto& uv : open_upvalues_) {
         if (!uv->is_closed && uv->stack_index == stack_slot) {
             return uv;
         }
     }
-    auto uv = std::make_shared<UpvalueObj>();
+    auto uv = make_rc<UpvalueObj>();
     uv->stack_index = stack_slot;
     open_upvalues_.push_back(uv);
     return uv;
@@ -62,12 +62,66 @@ void VM::close_upvalues(size_t from_slot) {
             ++it;
         }
     }
+    invalidate_stack_ptrs(from_slot);
+}
+
+void VM::invalidate_stack_ptrs(size_t from_slot) {
+    auto it = open_stack_ptrs_.begin();
+    while (it != open_stack_ptrs_.end()) {
+        auto& cell = *it;
+        if (cell->stack_slot >= from_slot) {
+            cell->alive = false;
+            cell->is_stack_slot = false;
+            it = open_stack_ptrs_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+const Value& VM::read_ptr_cell(const Rc<HeapCell>& cell, const SourceSpan& span) const {
+    if (!cell || !cell->alive) {
+        runtime_error("use after free or dangling pointer dereference", span);
+    }
+    if (cell->is_stack_slot) {
+        if (cell->stack_slot >= stack_.size()) {
+            runtime_error("dangling stack pointer dereference", span);
+        }
+        return stack_[cell->stack_slot];
+    }
+    if (cell->is_global) {
+        auto it = globals_.find(cell->global_name);
+        if (it == globals_.end()) {
+            runtime_error("dangling global pointer '" + cell->global_name + "'", span);
+        }
+        return it->second;
+    }
+    return cell->value;
+}
+
+void VM::write_ptr_cell(const Rc<HeapCell>& cell, Value val, const SourceSpan& span) {
+    if (!cell || !cell->alive) {
+        runtime_error("use after free or dangling pointer write", span);
+    }
+    if (cell->is_stack_slot) {
+        if (cell->stack_slot >= stack_.size()) {
+            runtime_error("dangling stack pointer write", span);
+        }
+        stack_[cell->stack_slot] = std::move(val);
+        return;
+    }
+    if (cell->is_global) {
+        globals_[cell->global_name] = std::move(val);
+        return;
+    }
+    cell->value = std::move(val);
 }
 
 Value VM::run(const std::shared_ptr<FunctionProto>& entry) {
     stack_.clear();
     frames_.clear();
     open_upvalues_.clear();
+    open_stack_ptrs_.clear();
 
     ValClosure top{entry, {}};
     stack_.push_back(Value{top});
@@ -81,6 +135,7 @@ Value VM::call_value(const Value& callee, const std::vector<Value>& args, const 
     stack_.clear();
     frames_.clear();
     open_upvalues_.clear();
+    open_stack_ptrs_.clear();
 
     if (auto* cl = std::get_if<ValClosure>(&callee.node)) {
         if (args.size() != cl->proto->arity) {
@@ -274,6 +329,18 @@ Value VM::execute() {
                 break;
             }
 
+            case OpCode::BitNot: {
+                int64_t v = std::get<ValInt>(stack_.back().node).value;
+                stack_.back() = Value::make_int(~v);
+                break;
+            }
+
+            case OpCode::LogicalNot: {
+                bool v = std::get<ValBool>(stack_.back().node).value;
+                stack_.back() = Value::make_bool(!v);
+                break;
+            }
+
             case OpCode::AddInt:
             case OpCode::SubInt:
             case OpCode::MulInt:
@@ -283,6 +350,11 @@ Value VM::execute() {
             case OpCode::SubFloat:
             case OpCode::MulFloat:
             case OpCode::DivFloat:
+            case OpCode::BitAnd:
+            case OpCode::BitOr:
+            case OpCode::BitXor:
+            case OpCode::Shl:
+            case OpCode::Shr:
             case OpCode::ConcatStr:
             case OpCode::Cons:
             case OpCode::Eq:
@@ -318,6 +390,203 @@ Value VM::execute() {
                 uint32_t tag = static_cast<uint32_t>(ins.arg1);
                 const std::string& name = chunk.names[static_cast<size_t>(ins.arg2)];
                 stack_.push_back(Value::make_adt(tag, name, {}));
+                break;
+            }
+
+            case OpCode::MakeStruct: {
+                const std::string& type_name = chunk.names[static_cast<size_t>(ins.arg1)];
+                size_t count = static_cast<size_t>(ins.arg2);
+                size_t start = stack_.size() - 2 * count;
+                std::unordered_map<std::string, Value> fields;
+                fields.reserve(count);
+                for (size_t i = 0; i < count; ++i) {
+                    const std::string& k = std::get<ValString>(stack_[start + 2 * i].node).value;
+                    fields[k] = stack_[start + 2 * i + 1];
+                }
+                stack_.resize(start);
+                stack_.push_back(Value::make_struct(type_name, std::move(fields)));
+                break;
+            }
+
+            case OpCode::GetField: {
+                const std::string& field = chunk.names[static_cast<size_t>(ins.arg1)];
+                Value obj = std::move(stack_.back());
+                stack_.pop_back();
+                auto* st = std::get_if<ValStruct>(&obj.node);
+                if (!st) {
+                    runtime_error("cannot access field '" + field + "' on non-struct value",
+                                  ins.span);
+                }
+                auto it = st->ptr->fields.find(field);
+                if (it == st->ptr->fields.end()) {
+                    runtime_error("unknown field '" + field + "' on '" + st->ptr->type_name + "'",
+                                  ins.span);
+                }
+                stack_.push_back(it->second);
+                break;
+            }
+
+            case OpCode::SetField: {
+                const std::string& field = chunk.names[static_cast<size_t>(ins.arg1)];
+                Value val = std::move(stack_.back());
+                stack_.pop_back();
+                Value obj = std::move(stack_.back());
+                stack_.pop_back();
+                auto* st = std::get_if<ValStruct>(&obj.node);
+                if (!st) {
+                    runtime_error("cannot assign field '" + field + "' on non-struct value",
+                                  ins.span);
+                }
+                st->ptr->fields[field] = std::move(val);
+                stack_.push_back(Value::unit());
+                break;
+            }
+
+            case OpCode::NewHeap: {
+                Value v = std::move(stack_.back());
+                stack_.back() = Value::make_heap_ptr(std::move(v));
+                break;
+            }
+
+            case OpCode::CloseHeap: {
+                Value p = std::move(stack_.back());
+                stack_.pop_back();
+                auto* pv = std::get_if<ValPtr>(&p.node);
+                if (!pv || !pv->ptr) {
+                    runtime_error("expected pointer in 'close'", ins.span);
+                }
+                if (!pv->ptr->is_heap) {
+                    runtime_error("cannot 'close' non-heap pointer (only pointers from 'new' are heap-allocated)",
+                                  ins.span);
+                }
+                if (!pv->ptr->alive) {
+                    runtime_error("double close on heap pointer", ins.span);
+                }
+                pv->ptr->alive = false;
+                pv->ptr->value = Value::unit();
+                live_heap_allocations().fetch_sub(1, std::memory_order_relaxed);
+                stack_.push_back(Value::unit());
+                break;
+            }
+
+            case OpCode::DerefPtr: {
+                Value p = std::move(stack_.back());
+                stack_.pop_back();
+                auto* pv = std::get_if<ValPtr>(&p.node);
+                if (!pv) runtime_error("cannot dereference non-pointer value", ins.span);
+                stack_.push_back(read_ptr_cell(pv->ptr, ins.span));
+                break;
+            }
+
+            case OpCode::SetDeref: {
+                Value val = std::move(stack_.back());
+                stack_.pop_back();
+                Value p = std::move(stack_.back());
+                stack_.pop_back();
+                auto* pv = std::get_if<ValPtr>(&p.node);
+                if (!pv) runtime_error("cannot assign through non-pointer value", ins.span);
+                write_ptr_cell(pv->ptr, std::move(val), ins.span);
+                stack_.push_back(Value::unit());
+                break;
+            }
+
+            case OpCode::GetPtrField: {
+                const std::string& field = chunk.names[static_cast<size_t>(ins.arg1)];
+                Value p = std::move(stack_.back());
+                stack_.pop_back();
+                auto* pv = std::get_if<ValPtr>(&p.node);
+                if (!pv) runtime_error("cannot access '->" + field + "' on non-pointer value", ins.span);
+                const Value& target = read_ptr_cell(pv->ptr, ins.span);
+                auto* st = std::get_if<ValStruct>(&target.node);
+                if (!st) {
+                    runtime_error("cannot access '->" + field + "' on pointer to non-struct value",
+                                  ins.span);
+                }
+                auto it = st->ptr->fields.find(field);
+                if (it == st->ptr->fields.end()) {
+                    runtime_error("unknown field '" + field + "' on '" + st->ptr->type_name + "'",
+                                  ins.span);
+                }
+                stack_.push_back(it->second);
+                break;
+            }
+
+            case OpCode::SetPtrField: {
+                const std::string& field = chunk.names[static_cast<size_t>(ins.arg1)];
+                Value val = std::move(stack_.back());
+                stack_.pop_back();
+                Value p = std::move(stack_.back());
+                stack_.pop_back();
+                auto* pv = std::get_if<ValPtr>(&p.node);
+                if (!pv) runtime_error("cannot assign '->" + field + "' on non-pointer value", ins.span);
+                const Value& target = read_ptr_cell(pv->ptr, ins.span);
+                auto* st = std::get_if<ValStruct>(&target.node);
+                if (!st) {
+                    runtime_error("cannot assign '->" + field + "' on pointer to non-struct value",
+                                  ins.span);
+                }
+                st->ptr->fields[field] = std::move(val);
+                stack_.push_back(Value::unit());
+                break;
+            }
+
+            case OpCode::AddrOfLocal: {
+                if (ins.arg1 < 0) {
+                    Value v = std::move(stack_.back());
+                    stack_.back() = Value{ValPtr{make_rc<HeapCell>(std::move(v), false)}};
+                } else {
+                    size_t slot = frame.base_slot + static_cast<size_t>(ins.arg1);
+                    Rc<HeapCell> existing;
+                    for (const auto& c : open_stack_ptrs_) {
+                        if (c->alive && c->stack_slot == slot) {
+                            existing = c;
+                            break;
+                        }
+                    }
+                    if (!existing) {
+                        existing = make_rc<HeapCell>(slot);
+                        open_stack_ptrs_.push_back(existing);
+                    }
+                    stack_.push_back(Value{ValPtr{std::move(existing)}});
+                }
+                break;
+            }
+
+            case OpCode::AddrOfGlobal: {
+                const std::string& name = chunk.names[static_cast<size_t>(ins.arg1)];
+                if (!globals_.count(name)) {
+                    runtime_error("undefined global '" + name + "' in address-of", ins.span);
+                }
+                stack_.push_back(Value::make_global_ptr(name));
+                break;
+            }
+
+            case OpCode::IterItems: {
+                Value col = std::move(stack_.back());
+                stack_.pop_back();
+                if (std::holds_alternative<ValList>(col.node)) {
+                    stack_.push_back(col);
+                } else if (auto* vec = std::get_if<ValVector>(&col.node)) {
+                    stack_.push_back(Value::make_list(vec->ptr->elems));
+                } else if (auto* set = std::get_if<ValSet>(&col.node)) {
+                    stack_.push_back(Value::make_list(set->ptr->elems));
+                } else if (auto* dict = std::get_if<ValDict>(&col.node)) {
+                    std::vector<Value> items;
+                    items.reserve(dict->ptr->entries.size());
+                    for (const auto& [k, v] : dict->ptr->entries) {
+                        items.push_back(Value::make_tuple({k, v}));
+                    }
+                    stack_.push_back(Value::make_list(std::move(items)));
+                } else if (auto* str = std::get_if<ValString>(&col.node)) {
+                    std::vector<Value> chars;
+                    chars.reserve(str->value.size());
+                    for (char c : str->value) {
+                        chars.push_back(Value::make_string(std::string(1, c)));
+                    }
+                    stack_.push_back(Value::make_list(std::move(chars)));
+                } else {
+                    runtime_error("value is not iterable in 'for each'", ins.span);
+                }
                 break;
             }
 
@@ -438,7 +707,7 @@ Value VM::execute() {
 
             case OpCode::MatchTuple: {
                 auto* tv = std::get_if<ValTuple>(&stack_.back().node);
-                if (!tv || tv->elems.size() != static_cast<size_t>(ins.arg1)) {
+                if (!tv || tv->ptr->elems.size() != static_cast<size_t>(ins.arg1)) {
                     stack_.pop_back();
                     frame.ip = static_cast<size_t>(ins.arg2);
                 }
@@ -447,7 +716,7 @@ Value VM::execute() {
 
             case OpCode::MatchListLen: {
                 auto* lv = std::get_if<ValList>(&stack_.back().node);
-                if (!lv || lv->elems.size() != static_cast<size_t>(ins.arg1)) {
+                if (!lv || lv->ptr->elems.size() != static_cast<size_t>(ins.arg1)) {
                     stack_.pop_back();
                     frame.ip = static_cast<size_t>(ins.arg2);
                 }
@@ -456,7 +725,7 @@ Value VM::execute() {
 
             case OpCode::MatchCons: {
                 auto* lv = std::get_if<ValList>(&stack_.back().node);
-                if (!lv || lv->elems.empty()) {
+                if (!lv || lv->ptr->elems.empty()) {
                     stack_.pop_back();
                     frame.ip = static_cast<size_t>(ins.arg2);
                 }
@@ -465,7 +734,7 @@ Value VM::execute() {
 
             case OpCode::MatchAdt: {
                 auto* av = std::get_if<ValAdt>(&stack_.back().node);
-                if (!av || av->tag != static_cast<uint32_t>(ins.arg1)) {
+                if (!av || av->ptr->tag != static_cast<uint32_t>(ins.arg1)) {
                     stack_.pop_back();
                     frame.ip = static_cast<size_t>(ins.arg2);
                 }
@@ -474,14 +743,14 @@ Value VM::execute() {
 
             case OpCode::TupleGet: {
                 const auto& tup = std::get<ValTuple>(stack_.back().node);
-                Value elem = tup.elems[static_cast<size_t>(ins.arg1)];
+                Value elem = tup.ptr->elems[static_cast<size_t>(ins.arg1)];
                 stack_.push_back(std::move(elem));
                 break;
             }
 
             case OpCode::ListGet: {
                 const auto& lst = std::get<ValList>(stack_.back().node);
-                Value elem = lst.elems[static_cast<size_t>(ins.arg1)];
+                Value elem = lst.ptr->elems[static_cast<size_t>(ins.arg1)];
                 stack_.push_back(std::move(elem));
                 break;
             }
@@ -489,15 +758,15 @@ Value VM::execute() {
             case OpCode::ListTail: {
                 const auto& lst = std::get<ValList>(stack_.back().node);
                 size_t start = static_cast<size_t>(ins.arg1);
-                std::vector<Value> tail(lst.elems.begin() + static_cast<ptrdiff_t>(start),
-                                        lst.elems.end());
+                std::vector<Value> tail(lst.ptr->elems.begin() + static_cast<ptrdiff_t>(start),
+                                        lst.ptr->elems.end());
                 stack_.push_back(Value::make_list(std::move(tail)));
                 break;
             }
 
             case OpCode::AdtField: {
                 const auto& adt = std::get<ValAdt>(stack_.back().node);
-                Value f = adt.fields[static_cast<size_t>(ins.arg1)];
+                Value f = adt.ptr->fields[static_cast<size_t>(ins.arg1)];
                 stack_.push_back(std::move(f));
                 break;
             }

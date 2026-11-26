@@ -17,6 +17,7 @@ private:
     char peek(size_t offset = 0) const;
     bool at_end() const;
     char advance();
+    void skip_horizontal_and_comments();
     void skip_whitespace_and_comments();
     Token scan_token();
     Token scan_number(size_t start_offset, size_t start_line, size_t start_col);
@@ -31,6 +32,9 @@ private:
     size_t pos_ = 0;
     size_t line_ = 1;
     size_t col_ = 1;
+    int paren_depth_ = 0;
+    bool at_line_start_ = true;
+    std::vector<size_t> indent_stack_;
 };
 
 }  // namespace cml

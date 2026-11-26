@@ -47,9 +47,12 @@ struct TFun {
 struct TTuple {
     std::vector<TypeExprPtr> elems;
 };
+struct TPtr {
+    TypeExprPtr inner;
+};
 
 struct TypeExpr {
-    std::variant<TVar, TCon, TFun, TTuple> node;
+    std::variant<TVar, TCon, TFun, TTuple, TPtr> node;
     SourceSpan span;
 };
 
@@ -101,6 +104,10 @@ struct Pattern {
 enum class UnaryOp {
     NegInt,
     NegFloat,
+    BitNot,
+    LogicalNot,
+    Deref,
+    AddrOf,
 };
 
 enum class BinaryOp {
@@ -113,6 +120,11 @@ enum class BinaryOp {
     SubFloat,
     MulFloat,
     DivFloat,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
     ConcatStr,
     Cons,
     Eq,
@@ -209,12 +221,77 @@ struct ExprUnquote {
 struct ExprUnquoteSlot {
     size_t index = 0;
 };
+struct ExprImport {
+    std::string path;
+};
+struct ExprStructLit {
+    Ident type_name;
+    std::vector<std::pair<Ident, ExprPtr>> fields;
+};
+struct ExprFieldGet {
+    ExprPtr obj;
+    Ident field;
+};
+struct ExprFieldSet {
+    ExprPtr obj;
+    Ident field;
+    ExprPtr value;
+};
+struct ExprNew {
+    ExprPtr value;
+};
+struct ExprClose {
+    ExprPtr ptr;
+};
+struct ExprDefer {
+    ExprPtr action;
+};
+struct ExprDerefSet {
+    ExprPtr ptr;
+    ExprPtr value;
+};
+struct ExprPtrFieldGet {
+    ExprPtr ptr;
+    Ident field;
+};
+struct ExprPtrFieldSet {
+    ExprPtr ptr;
+    Ident field;
+    ExprPtr value;
+};
+struct ExprAssign {
+    Ident target;
+    ExprPtr value;
+};
+struct ExprBlock {
+    std::vector<StmtPtr> stmts;
+};
+struct ExprWhile {
+    ExprPtr cond;
+    ExprPtr body;
+};
+struct ExprFor {
+    std::optional<StmtPtr> init;
+    ExprPtr cond;
+    std::optional<ExprPtr> step;
+    ExprPtr body;
+};
+struct ExprForEach {
+    PatternPtr pat;
+    ExprPtr iterable;
+    ExprPtr body;
+};
+struct ExprBreak {};
+struct ExprContinue {};
 
 struct Expr {
     std::variant<ExprInt, ExprFloat, ExprBool, ExprString, ExprUnit, ExprVar, ExprCtor,
                  ExprTuple, ExprList, ExprUnary, ExprBinary, ExprIf, ExprLet, ExprFn,
                  ExprApp, ExprMacroCall, ExprMatch, ExprAnnot, ExprQuote, ExprUnquote,
-                 ExprUnquoteSlot>
+                 ExprUnquoteSlot, ExprImport, ExprStructLit, ExprFieldGet, ExprFieldSet,
+                 ExprNew, ExprClose, ExprDefer, ExprDerefSet, ExprPtrFieldGet, ExprPtrFieldSet,
+                 ExprAssign, ExprBlock, ExprWhile, ExprFor, ExprForEach, ExprBreak,
+                 ExprContinue>
         node;
     SourceSpan span;
 };
@@ -231,9 +308,27 @@ struct StmtTypeDecl {
     std::vector<CtorDecl> ctors;
 };
 
+struct StructFieldDecl {
+    Ident name;
+    TypeExprPtr type;
+    SourceSpan span;
+};
+
+struct StmtStructDecl {
+    Ident name;
+    std::vector<Ident> type_params;
+    std::vector<StructFieldDecl> fields;
+};
+
 struct StmtLet {
     bool is_rec = false;
     PatternPtr pat;
+    std::optional<TypeExprPtr> type_ann;
+    ExprPtr value;
+};
+
+struct StmtVar {
+    Ident name;
     std::optional<TypeExprPtr> type_ann;
     ExprPtr value;
 };
@@ -244,12 +339,17 @@ struct StmtMacro {
     ExprPtr body;
 };
 
+struct StmtImport {
+    std::string path;
+};
+
 struct StmtExpr {
     ExprPtr expr;
 };
 
 struct Stmt {
-    std::variant<StmtTypeDecl, StmtLet, StmtMacro, StmtExpr> node;
+    std::variant<StmtTypeDecl, StmtStructDecl, StmtLet, StmtVar, StmtMacro, StmtImport, StmtExpr>
+        node;
     SourceSpan span;
 };
 

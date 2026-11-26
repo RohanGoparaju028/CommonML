@@ -23,6 +23,9 @@ add_library(commonml_core STATIC
     src/types/typecheck_expr.cpp
     src/runtime/value.cpp
     src/runtime/builtins.cpp
+    src/runtime/builtins_collections.cpp
+    src/runtime/builtins_io.cpp
+    src/runtime/builtins_net.cpp
     src/bytecode/bytecode.cpp
     src/codegen/compiler_state.cpp
     src/codegen/compiler_pat.cpp
@@ -32,14 +35,48 @@ add_library(commonml_core STATIC
     src/macro/macro_expander.cpp
     src/driver/pipeline.cpp
     src/driver/repl.cpp
+    src/driver/highlight.cpp
+    src/driver/toolchain.cpp
+    src/pkg/package.cpp
 )
 
 target_include_directories(commonml_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+target_compile_definitions(commonml_core PUBLIC
+    CML_STDLIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/stdlib"
+    CML_VERSION_STRING="${PROJECT_VERSION}"
+)
 
 add_executable(commonml src/main.cpp)
 target_link_libraries(commonml PRIVATE commonml_core)
+
+add_executable(cml src/main.cpp)
+target_link_libraries(cml PRIVATE commonml_core)
+
+add_executable(cmlc src/cmlc_main.cpp)
+target_link_libraries(cmlc PRIVATE commonml_core)
+target_compile_definitions(cmlc PRIVATE
+    CML_COMMONML_BIN="$<TARGET_FILE:commonml>"
+)
+target_compile_definitions(cml PRIVATE
+    CML_COMMONML_BIN="$<TARGET_FILE:commonml>"
+)
+target_compile_definitions(commonml PRIVATE
+    CML_COMMONML_BIN="$<TARGET_FILE:commonml>"
+)
+
+install(TARGETS commonml cml cmlc RUNTIME DESTINATION bin)
+install(DIRECTORY stdlib/ DESTINATION share/commonml/stdlib FILES_MATCHING PATTERN "*.cml")
+install(DIRECTORY bootstrap/ DESTINATION share/commonml/bootstrap FILES_MATCHING PATTERN "*.cml")
+install(DIRECTORY editors/vscode/ DESTINATION share/commonml/editors/vscode)
+install(FILES README.md DESTINATION share/doc/commonml)
+
+set(CPACK_PACKAGE_NAME "commonml")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "CommonML functional language compiler, VM, and package manager")
+set(CPACK_GENERATOR "TGZ;ZIP")
+include(CPack)
 
 enable_testing()
 add_executable(commonml_tests
@@ -48,6 +85,7 @@ add_executable(commonml_tests
     tests/test_typecheck.cpp
     tests/test_macros.cpp
     tests/test_vm.cpp
+    tests/test_platform.cpp
 )
 target_link_libraries(commonml_tests PRIVATE commonml_core)
 add_test(NAME commonml_unit_tests COMMAND commonml_tests)

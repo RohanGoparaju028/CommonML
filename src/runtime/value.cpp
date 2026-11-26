@@ -1,11 +1,16 @@
 #include "cml/value.hpp"
 #include "cml/bytecode.hpp"
+#include "cml/vm.hpp"
 
+#include <algorithm>
 #include <sstream>
 
 namespace cml {
 
-bool values_equal(const Value& a, const Value& b) {
+namespace {
+
+bool values_equal_depth(const Value& a, const Value& b, int depth) {
+    if (depth > 64) return false;
     if (a.node.index() != b.node.index()) return false;
     return std::visit(
         [&](const auto& va) -> bool {
@@ -22,26 +27,89 @@ bool values_equal(const Value& a, const Value& b) {
             } else if constexpr (std::is_same_v<T, ValString>) {
                 return va.value == vb.value;
             } else if constexpr (std::is_same_v<T, ValTuple>) {
-                if (va.elems.size() != vb.elems.size()) return false;
-                for (size_t i = 0; i < va.elems.size(); ++i) {
-                    if (!values_equal(va.elems[i], vb.elems[i])) return false;
+                if (va.ptr == vb.ptr) return true;
+                if (va.ptr->elems.size() != vb.ptr->elems.size()) return false;
+                for (size_t i = 0; i < va.ptr->elems.size(); ++i) {
+                    if (!values_equal_depth(va.ptr->elems[i], vb.ptr->elems[i], depth + 1)) {
+                        return false;
+                    }
                 }
                 return true;
             } else if constexpr (std::is_same_v<T, ValList>) {
-                if (va.elems.size() != vb.elems.size()) return false;
-                for (size_t i = 0; i < va.elems.size(); ++i) {
-                    if (!values_equal(va.elems[i], vb.elems[i])) return false;
+                if (va.ptr == vb.ptr) return true;
+                if (va.ptr->elems.size() != vb.ptr->elems.size()) return false;
+                for (size_t i = 0; i < va.ptr->elems.size(); ++i) {
+                    if (!values_equal_depth(va.ptr->elems[i], vb.ptr->elems[i], depth + 1)) {
+                        return false;
+                    }
                 }
                 return true;
             } else if constexpr (std::is_same_v<T, ValAdt>) {
-                if (va.tag != vb.tag || va.ctor_name != vb.ctor_name ||
-                    va.fields.size() != vb.fields.size()) {
+                if (va.ptr == vb.ptr) return true;
+                if (va.ptr->tag != vb.ptr->tag || va.ptr->ctor_name != vb.ptr->ctor_name ||
+                    va.ptr->fields.size() != vb.ptr->fields.size()) {
                     return false;
                 }
-                for (size_t i = 0; i < va.fields.size(); ++i) {
-                    if (!values_equal(va.fields[i], vb.fields[i])) return false;
+                for (size_t i = 0; i < va.ptr->fields.size(); ++i) {
+                    if (!values_equal_depth(va.ptr->fields[i], vb.ptr->fields[i], depth + 1)) {
+                        return false;
+                    }
                 }
                 return true;
+            } else if constexpr (std::is_same_v<T, ValStruct>) {
+                if (va.ptr == vb.ptr) return true;
+                if (va.ptr->type_name != vb.ptr->type_name ||
+                    va.ptr->fields.size() != vb.ptr->fields.size()) {
+                    return false;
+                }
+                for (const auto& [k, v] : va.ptr->fields) {
+                    auto it = vb.ptr->fields.find(k);
+                    if (it == vb.ptr->fields.end() ||
+                        !values_equal_depth(v, it->second, depth + 1)) {
+                        return false;
+                    }
+                }
+                return true;
+            } else if constexpr (std::is_same_v<T, ValVector>) {
+                if (va.ptr == vb.ptr) return true;
+                if (va.ptr->elems.size() != vb.ptr->elems.size()) return false;
+                for (size_t i = 0; i < va.ptr->elems.size(); ++i) {
+                    if (!values_equal_depth(va.ptr->elems[i], vb.ptr->elems[i], depth + 1)) {
+                        return false;
+                    }
+                }
+                return true;
+            } else if constexpr (std::is_same_v<T, ValDict>) {
+                if (va.ptr == vb.ptr) return true;
+                if (va.ptr->entries.size() != vb.ptr->entries.size()) return false;
+                for (const auto& [k, v] : va.ptr->entries) {
+                    bool found = false;
+                    for (const auto& [k2, v2] : vb.ptr->entries) {
+                        if (values_equal_depth(k, k2, depth + 1) &&
+                            values_equal_depth(v, v2, depth + 1)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) return false;
+                }
+                return true;
+            } else if constexpr (std::is_same_v<T, ValSet>) {
+                if (va.ptr == vb.ptr) return true;
+                if (va.ptr->elems.size() != vb.ptr->elems.size()) return false;
+                for (const auto& e : va.ptr->elems) {
+                    bool found = false;
+                    for (const auto& e2 : vb.ptr->elems) {
+                        if (values_equal_depth(e, e2, depth + 1)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) return false;
+                }
+                return true;
+            } else if constexpr (std::is_same_v<T, ValPtr>) {
+                return va.ptr == vb.ptr;
             } else if constexpr (std::is_same_v<T, ValClosure>) {
                 return va.proto == vb.proto && va.upvalues == vb.upvalues;
             } else if constexpr (std::is_same_v<T, ValNative>) {
@@ -56,6 +124,12 @@ bool values_equal(const Value& a, const Value& b) {
             }
         },
         a.node);
+}
+
+}  // namespace
+
+bool values_equal(const Value& a, const Value& b) {
+    return values_equal_depth(a, b, 0);
 }
 
 int compare_values(const Value& a, const Value& b) {
@@ -77,35 +151,45 @@ int compare_values(const Value& a, const Value& b) {
             } else if constexpr (std::is_same_v<T, ValString>) {
                 return va.value < vb.value ? -1 : (va.value > vb.value ? 1 : 0);
             } else if constexpr (std::is_same_v<T, ValTuple>) {
-                size_t n = std::min(va.elems.size(), vb.elems.size());
+                size_t n = std::min(va.ptr->elems.size(), vb.ptr->elems.size());
                 for (size_t i = 0; i < n; ++i) {
-                    int c = compare_values(va.elems[i], vb.elems[i]);
+                    int c = compare_values(va.ptr->elems[i], vb.ptr->elems[i]);
                     if (c != 0) return c;
                 }
-                return va.elems.size() < vb.elems.size() ? -1
-                       : (va.elems.size() > vb.elems.size() ? 1 : 0);
+                return va.ptr->elems.size() < vb.ptr->elems.size()
+                           ? -1
+                           : (va.ptr->elems.size() > vb.ptr->elems.size() ? 1 : 0);
             } else if constexpr (std::is_same_v<T, ValList>) {
-                size_t n = std::min(va.elems.size(), vb.elems.size());
+                size_t n = std::min(va.ptr->elems.size(), vb.ptr->elems.size());
                 for (size_t i = 0; i < n; ++i) {
-                    int c = compare_values(va.elems[i], vb.elems[i]);
+                    int c = compare_values(va.ptr->elems[i], vb.ptr->elems[i]);
                     if (c != 0) return c;
                 }
-                return va.elems.size() < vb.elems.size() ? -1
-                       : (va.elems.size() > vb.elems.size() ? 1 : 0);
+                return va.ptr->elems.size() < vb.ptr->elems.size()
+                           ? -1
+                           : (va.ptr->elems.size() > vb.ptr->elems.size() ? 1 : 0);
             } else if constexpr (std::is_same_v<T, ValAdt>) {
-                if (va.tag != vb.tag) return va.tag < vb.tag ? -1 : 1;
-                size_t n = std::min(va.fields.size(), vb.fields.size());
+                if (va.ptr->tag != vb.ptr->tag) return va.ptr->tag < vb.ptr->tag ? -1 : 1;
+                size_t n = std::min(va.ptr->fields.size(), vb.ptr->fields.size());
                 for (size_t i = 0; i < n; ++i) {
-                    int c = compare_values(va.fields[i], vb.fields[i]);
+                    int c = compare_values(va.ptr->fields[i], vb.ptr->fields[i]);
                     if (c != 0) return c;
                 }
-                return va.fields.size() < vb.fields.size() ? -1
-                       : (va.fields.size() > vb.fields.size() ? 1 : 0);
+                return va.ptr->fields.size() < vb.ptr->fields.size()
+                           ? -1
+                           : (va.ptr->fields.size() > vb.ptr->fields.size() ? 1 : 0);
             } else {
                 return 0;
             }
         },
         a.node);
+}
+
+static std::string format_elem(const Value& v) {
+    if (std::holds_alternative<ValString>(v.node)) {
+        return "\"" + value_to_string(v) + "\"";
+    }
+    return value_to_string(v);
 }
 
 std::string value_to_string(const Value& v) {
@@ -126,44 +210,73 @@ std::string value_to_string(const Value& v) {
                 return n.value;
             } else if constexpr (std::is_same_v<T, ValTuple>) {
                 std::string s = "(";
-                for (size_t i = 0; i < n.elems.size(); ++i) {
+                for (size_t i = 0; i < n.ptr->elems.size(); ++i) {
                     if (i > 0) s += ", ";
-                    if (std::holds_alternative<ValString>(n.elems[i].node)) {
-                        s += "\"" + value_to_string(n.elems[i]) + "\"";
-                    } else {
-                        s += value_to_string(n.elems[i]);
-                    }
+                    s += format_elem(n.ptr->elems[i]);
                 }
                 s += ")";
                 return s;
             } else if constexpr (std::is_same_v<T, ValList>) {
                 std::string s = "[";
-                for (size_t i = 0; i < n.elems.size(); ++i) {
+                for (size_t i = 0; i < n.ptr->elems.size(); ++i) {
                     if (i > 0) s += ", ";
-                    if (std::holds_alternative<ValString>(n.elems[i].node)) {
-                        s += "\"" + value_to_string(n.elems[i]) + "\"";
-                    } else {
-                        s += value_to_string(n.elems[i]);
-                    }
+                    s += format_elem(n.ptr->elems[i]);
                 }
                 s += "]";
                 return s;
             } else if constexpr (std::is_same_v<T, ValAdt>) {
-                if (n.fields.empty()) return n.ctor_name;
-                std::string s = n.ctor_name;
-                for (const auto& f : n.fields) {
+                if (n.ptr->fields.empty()) return n.ptr->ctor_name;
+                std::string s = n.ptr->ctor_name;
+                for (const auto& f : n.ptr->fields) {
                     s += " ";
                     bool wrap = std::holds_alternative<ValAdt>(f.node) &&
-                                !std::get<ValAdt>(f.node).fields.empty();
+                                !std::get<ValAdt>(f.node).ptr->fields.empty();
                     if (wrap) s += "(";
-                    if (std::holds_alternative<ValString>(f.node)) {
-                        s += "\"" + value_to_string(f) + "\"";
-                    } else {
-                        s += value_to_string(f);
-                    }
+                    s += format_elem(f);
                     if (wrap) s += ")";
                 }
                 return s;
+            } else if constexpr (std::is_same_v<T, ValStruct>) {
+                std::vector<std::string> keys;
+                keys.reserve(n.ptr->fields.size());
+                for (const auto& [k, _] : n.ptr->fields) keys.push_back(k);
+                std::sort(keys.begin(), keys.end());
+                std::string s = n.ptr->type_name + " { ";
+                for (size_t i = 0; i < keys.size(); ++i) {
+                    if (i > 0) s += ", ";
+                    s += keys[i] + " = " + format_elem(n.ptr->fields.at(keys[i]));
+                }
+                s += " }";
+                return s;
+            } else if constexpr (std::is_same_v<T, ValVector>) {
+                std::string s = "Vector[";
+                for (size_t i = 0; i < n.ptr->elems.size(); ++i) {
+                    if (i > 0) s += ", ";
+                    s += format_elem(n.ptr->elems[i]);
+                }
+                s += "]";
+                return s;
+            } else if constexpr (std::is_same_v<T, ValDict>) {
+                std::string s = "Dict{";
+                for (size_t i = 0; i < n.ptr->entries.size(); ++i) {
+                    if (i > 0) s += ", ";
+                    s += format_elem(n.ptr->entries[i].first) + " -> " +
+                         format_elem(n.ptr->entries[i].second);
+                }
+                s += "}";
+                return s;
+            } else if constexpr (std::is_same_v<T, ValSet>) {
+                std::string s = "Set{";
+                for (size_t i = 0; i < n.ptr->elems.size(); ++i) {
+                    if (i > 0) s += ", ";
+                    s += format_elem(n.ptr->elems[i]);
+                }
+                s += "}";
+                return s;
+            } else if constexpr (std::is_same_v<T, ValPtr>) {
+                if (!n.ptr || !n.ptr->alive) return "<closed ptr>";
+                if (n.ptr->is_stack_slot) return "<stack ptr>";
+                return "&(" + format_elem(n.ptr->value) + ")";
             } else if constexpr (std::is_same_v<T, ValClosure>) {
                 return "<fn " + (n.proto ? n.proto->name : "lambda") + ">";
             } else if constexpr (std::is_same_v<T, ValNative>) {
@@ -184,6 +297,22 @@ bool is_truthy(const Value& v) {
         return b->value;
     }
     return false;
+}
+
+size_t value_ref_count(const Value& v) {
+    return std::visit(
+        [](const auto& n) -> size_t {
+            using T = std::decay_t<decltype(n)>;
+            if constexpr (std::is_same_v<T, ValTuple> || std::is_same_v<T, ValList> ||
+                          std::is_same_v<T, ValAdt> || std::is_same_v<T, ValStruct> ||
+                          std::is_same_v<T, ValVector> || std::is_same_v<T, ValDict> ||
+                          std::is_same_v<T, ValSet> || std::is_same_v<T, ValPtr>) {
+                return n.ptr.use_count();
+            } else {
+                return 1;
+            }
+        },
+        v.node);
 }
 
 }  // namespace cml

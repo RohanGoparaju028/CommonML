@@ -1,0 +1,638 @@
+-- Bootstrap CommonML Bytecode Compiler written in CommonML
+let core = import "std/core"
+let bc = import "bytecode.cml"
+
+-- FnSt: name, arity, max_locals, locals (name, slot, captured), upvalues (is_local, idx), code, consts, names
+type FnSt = FnSt String Int Int (List (String * Int * Bool)) (List (Bool * Int)) (List BInstr) (List BConst) (List String)
+
+-- CState: fn_stack, finished_protos, ctors (name, tag, arity), next_tag
+type CState = CSt (List FnSt) (List BProto) (List (String * Int * Int)) Int
+
+let list_replace idx val xs =
+  let n = list_len xs in
+  let rec go i acc =
+    if i >= n then list_rev acc
+    else go (i + 1) ((if i == idx then val else list_nth xs i) :: acc)
+  in
+  go 0 []
+
+let cs_cur st = match st with | CSt fns _ _ _ -> head fns
+
+let cs_set_cur fn_st st =
+  match st with
+  | CSt fns protos ctors nt -> CSt (fn_st :: tail fns) protos ctors nt
+
+let cs_begin_fn name arity st =
+  let f = FnSt name arity 0 [] [] [] [] [] in
+  match st with
+  | CSt fns protos ctors nt -> CSt (f :: fns) protos ctors nt
+
+let cs_end_fn st =
+  match st with
+  | CSt fns protos ctors nt ->
+      match head fns with
+      | FnSt name arity max_loc _ upvals code consts names ->
+          let pid = list_len protos in
+          let proto = BPr name arity max_loc upvals consts names code in
+          (pid, CSt (tail fns) (list_snoc protos proto) ctors nt)
+
+let cs_add_const c st =
+  match cs_cur st with
+  | FnSt nm ar ml locs uvs code consts nms ->
+      let idx = list_len consts in
+      let fn1 = FnSt nm ar ml locs uvs code (list_snoc consts c) nms in
+      (idx, cs_set_cur fn1 st)
+
+let cs_add_name name st =
+  match cs_cur st with
+  | FnSt nm ar ml locs uvs code consts nms ->
+      let n = list_len nms in
+      let rec find_idx i =
+        if i >= n then -1
+        else if list_nth nms i == name then i
+        else find_idx (i + 1)
+      in
+      let found = find_idx 0 in
+      if found >= 0 then (found, st)
+      else
+        let fn1 = FnSt nm ar ml locs uvs code consts (list_snoc nms name) in
+        (n, cs_set_cur fn1 st)
+
+let cs_emit op a1 a2 st =
+  match cs_cur st with
+  | FnSt nm ar ml locs uvs code consts nms ->
+      let idx = list_len code in
+      let fn1 = FnSt nm ar ml locs uvs (list_snoc code (BIns op a1 a2)) consts nms in
+      (idx, cs_set_cur fn1 st)
+
+let cs_emit_s op a1 a2 st =
+  let (_, st1) = cs_emit op a1 a2 st in
+  st1
+
+let cs_patch_jump idx st =
+  match cs_cur st with
+  | FnSt nm ar ml locs uvs code consts nms ->
+      let target = list_len code in
+      let ins = list_nth code idx in
+      let patched =
+        match ins with
+        | BIns OpJump _ a2 -> BIns OpJump target a2
+        | BIns OpJumpIfFalse _ a2 -> BIns OpJumpIfFalse target a2
+        | BIns OpJumpIfTrue _ a2 -> BIns OpJumpIfTrue target a2
+        | BIns op a1 _ -> BIns op a1 target
+      in
+      let fn1 = FnSt nm ar ml locs uvs (list_replace idx patched code) consts nms in
+      cs_set_cur fn1 st
+
+let cs_alloc_local name st =
+  match cs_cur st with
+  | FnSt nm ar ml locs uvs code consts nms ->
+      let slot = list_len locs in
+      let new_ml = if slot + 1 > ml then slot + 1 else ml in
+      let fn1 = FnSt nm ar new_ml (list_snoc locs (name, slot, false)) uvs code consts nms in
+      (slot, cs_set_cur fn1 st)
+
+let cs_rename_local slot new_name st =
+  match cs_cur st with
+  | FnSt nm ar ml locs uvs code consts nms ->
+      let (_, s, cap) = list_nth locs slot in
+      let fn1 = FnSt nm ar ml (list_replace slot (new_name, s, cap) locs) uvs code consts nms in
+      cs_set_cur fn1 st
+
+let cs_local_count st =
+  match cs_cur st with
+  | FnSt _ _ _ locs _ _ _ _ -> list_len locs
+
+let cs_pop_locals_to mark st =
+  let rec go s =
+    let cnt = cs_local_count s in
+    if cnt <= mark then s
+    else
+      match cs_cur s with
+      | FnSt nm ar ml locs uvs code consts nms ->
+          let (_, slot, cap) = list_nth locs (cnt - 1) in
+          let popped_locs = list_slice locs 0 (cnt - 1) in
+          let s1 = cs_set_cur (FnSt nm ar ml popped_locs uvs code consts nms) s in
+          let s2 = if cap then cs_emit_s OpCloseUpvalue slot 0 s1 else s1 in
+          go s2
+  in
+  go st
+
+let resolve_local_in fn_st name =
+  match fn_st with
+  | FnSt _ _ _ locs _ _ _ _ ->
+      let rec go i =
+        if i < 0 then -1
+        else
+          let (lnm, slot, _) = list_nth locs i in
+          if lnm == name then slot else go (i - 1)
+      in
+      go (list_len locs - 1)
+
+let fn_add_upvalue fn_st is_local idx =
+  match fn_st with
+  | FnSt nm ar ml locs uvs code consts nms ->
+      let n = list_len uvs in
+      let rec find_uv i =
+        if i >= n then -1
+        else
+          let (il, ix) = list_nth uvs i in
+          if il == is_local && ix == idx then i else find_uv (i + 1)
+      in
+      let found = find_uv 0 in
+      if found >= 0 then (found, fn_st)
+      else (n, FnSt nm ar ml locs (list_snoc uvs (is_local, idx)) code consts nms)
+
+let fn_mark_captured fn_st slot =
+  match fn_st with
+  | FnSt nm ar ml locs uvs code consts nms ->
+      let (lnm, s, _) = list_nth locs slot in
+      FnSt nm ar ml (list_replace slot (lnm, s, true) locs) uvs code consts nms
+
+let rec resolve_upvalue_stack fns name =
+  if list_len fns <= 1 then (-1, fns)
+  else
+    let cur = head fns in
+    let enc = list_nth fns 1 in
+    let local_slot = resolve_local_in enc name in
+    if local_slot >= 0 then
+      let enc1 = fn_mark_captured enc local_slot in
+      let (uv_idx, cur1) = fn_add_upvalue cur true local_slot in
+      let rest = list_slice fns 2 (list_len fns - 2) in
+      (uv_idx, cur1 :: (enc1 :: rest))
+    else
+      let (enc_uv, enc_rest) = resolve_upvalue_stack (tail fns) name in
+      if enc_uv >= 0 then
+        let (uv_idx, cur1) = fn_add_upvalue cur false enc_uv in
+        (uv_idx, cur1 :: enc_rest)
+      else (-1, fns)
+
+let cs_find_ctor cname st =
+  match st with
+  | CSt _ _ ctors _ ->
+      core.list_find (fn c -> match c with | (nm, _, _) -> nm == cname) ctors
+
+let cs_register_type cdefs st =
+  let rec go i s =
+    if i >= list_len cdefs then s
+    else
+      let (cname, arity) = list_nth cdefs i in
+      let s1 =
+        match s with
+        | CSt fns protos ctors nt ->
+            CSt fns protos (list_snoc ctors (cname, nt, arity)) (nt + 1)
+      in
+      go (i + 1) s1
+  in
+  go 0 st
+
+let rec collect_pat_binders pat acc =
+  match pat with
+  | PVar nm -> nm :: acc
+  | PTuple ps -> core.list_foldl (fn a p -> collect_pat_binders p a) acc ps
+  | PList ps -> core.list_foldl (fn a p -> collect_pat_binders p a) acc ps
+  | PCons hd tl -> collect_pat_binders tl (collect_pat_binders hd acc)
+  | PCtor _ args -> core.list_foldl (fn a p -> collect_pat_binders p a) acc args
+  | _ -> acc
+
+let rec compile_pat_match pat fail_jumps st =
+  match pat with
+  | PWild -> (fail_jumps, cs_emit_s OpPop 0 0 st)
+  | PVar nm ->
+      let (slot, st1) = cs_alloc_local nm st in
+      (fail_jumps, cs_emit_s OpSetLocal slot 0 st1)
+  | PInt x ->
+      let (ci, st1) = cs_add_const (BCInt x) st in
+      let (ji, st2) = cs_emit OpMatchInt ci 0 st1 in
+      (list_snoc fail_jumps ji, st2)
+  | PFloat x ->
+      let (ci, st1) = cs_add_const (BCFloat x) st in
+      let (ji, st2) = cs_emit OpMatchFloat ci 0 st1 in
+      (list_snoc fail_jumps ji, st2)
+  | PBool b ->
+      let (ji, st1) = cs_emit OpMatchBool (if b then 1 else 0) 0 st in
+      (list_snoc fail_jumps ji, st1)
+  | PString s ->
+      let (ci, st1) = cs_add_const (BCString s) st in
+      let (ji, st2) = cs_emit OpMatchString ci 0 st1 in
+      (list_snoc fail_jumps ji, st2)
+  | PUnit ->
+      let (ji, st1) = cs_emit OpMatchUnit 0 0 st in
+      (list_snoc fail_jumps ji, st1)
+  | PTuple elems ->
+      let (ji, st1) = cs_emit OpMatchTuple (list_len elems) 0 st in
+      let fj1 = list_snoc fail_jumps ji in
+      let rec go i sub_f s =
+        if i >= list_len elems then (sub_f, s)
+        else
+          let s1 = cs_emit_s OpTupleGet i 0 s in
+          let (sub_f1, s2) = compile_pat_match (list_nth elems i) sub_f s1 in
+          go (i + 1) sub_f1 s2
+      in
+      let (sub_fails, st2) = go 0 [] st1 in
+      let st3 = cs_emit_s OpPop 0 0 st2 in
+      if is_empty sub_fails then (fj1, st3)
+      else
+        let (ok_j, st4) = cs_emit OpJump 0 0 st3 in
+        let st5 = core.list_foldl (fn s j -> cs_patch_jump j s) st4 sub_fails in
+        let st6 = cs_emit_s OpPop 0 0 st5 in
+        let (out_j, st7) = cs_emit OpJump 0 0 st6 in
+        (list_snoc fj1 out_j, cs_patch_jump ok_j st7)
+  | PList elems ->
+      let (ji, st1) = cs_emit OpMatchListLen (list_len elems) 0 st in
+      let fj1 = list_snoc fail_jumps ji in
+      let rec go i sub_f s =
+        if i >= list_len elems then (sub_f, s)
+        else
+          let s1 = cs_emit_s OpListGet i 0 s in
+          let (sub_f1, s2) = compile_pat_match (list_nth elems i) sub_f s1 in
+          go (i + 1) sub_f1 s2
+      in
+      let (sub_fails, st2) = go 0 [] st1 in
+      let st3 = cs_emit_s OpPop 0 0 st2 in
+      if is_empty sub_fails then (fj1, st3)
+      else
+        let (ok_j, st4) = cs_emit OpJump 0 0 st3 in
+        let st5 = core.list_foldl (fn s j -> cs_patch_jump j s) st4 sub_fails in
+        let st6 = cs_emit_s OpPop 0 0 st5 in
+        let (out_j, st7) = cs_emit OpJump 0 0 st6 in
+        (list_snoc fj1 out_j, cs_patch_jump ok_j st7)
+  | PCons hd tl ->
+      let (ji, st1) = cs_emit OpMatchCons 0 0 st in
+      let fj1 = list_snoc fail_jumps ji in
+      let st2 = cs_emit_s OpListGet 0 0 st1 in
+      let (sf1, st3) = compile_pat_match hd [] st2 in
+      let st4 = cs_emit_s OpListTail 1 0 st3 in
+      let (sf2, st5) = compile_pat_match tl sf1 st4 in
+      let st6 = cs_emit_s OpPop 0 0 st5 in
+      if is_empty sf2 then (fj1, st6)
+      else
+        let (ok_j, st7) = cs_emit OpJump 0 0 st6 in
+        let st8 = core.list_foldl (fn s j -> cs_patch_jump j s) st7 sf2 in
+        let st9 = cs_emit_s OpPop 0 0 st8 in
+        let (out_j, st10) = cs_emit OpJump 0 0 st9 in
+        (list_snoc fj1 out_j, cs_patch_jump ok_j st10)
+  | PCtor cname args ->
+      (match cs_find_ctor cname st with
+      | None -> panic ("bootstrap codegen error: unknown ctor '" ++ cname ++ "'")
+      | Some (_, tag, _) ->
+          let (ji, st1) = cs_emit OpMatchAdt tag 0 st in
+          let fj1 = list_snoc fail_jumps ji in
+          let rec go i sub_f s =
+            if i >= list_len args then (sub_f, s)
+            else
+              let s1 = cs_emit_s OpAdtField i 0 s in
+              let (sub_f1, s2) = compile_pat_match (list_nth args i) sub_f s1 in
+              go (i + 1) sub_f1 s2
+          in
+          let (sub_fails, st2) = go 0 [] st1 in
+          let st3 = cs_emit_s OpPop 0 0 st2 in
+          if is_empty sub_fails then (fj1, st3)
+          else
+            let (ok_j, st4) = cs_emit OpJump 0 0 st3 in
+            let st5 = core.list_foldl (fn s j -> cs_patch_jump j s) st4 sub_fails in
+            let st6 = cs_emit_s OpPop 0 0 st5 in
+            let (out_j, st7) = cs_emit OpJump 0 0 st6 in
+            (list_snoc fj1 out_j, cs_patch_jump ok_j st7))
+
+let compile_pat_bind pat is_global st =
+  if not is_global then
+    let (fails, st1) = compile_pat_match pat [] st in
+    if is_empty fails then st1
+    else
+      let (ok_j, st2) = cs_emit OpJump 0 0 st1 in
+      let st3 = core.list_foldl (fn s j -> cs_patch_jump j s) st2 fails in
+      let st4 = cs_emit_s OpMatchFail 0 0 st3 in
+      cs_patch_jump ok_j st4
+  else
+    let mark = cs_local_count st in
+    let (fails, st1) = compile_pat_match pat [] st in
+    let st2 =
+      if is_empty fails then st1
+      else
+        let (ok_j, s2) = cs_emit OpJump 0 0 st1 in
+        let s3 = core.list_foldl (fn s j -> cs_patch_jump j s) s2 fails in
+        let s4 = cs_emit_s OpMatchFail 0 0 s3 in
+        cs_patch_jump ok_j s4
+    in
+    let cnt = cs_local_count st2 in
+    let rec def_globals i s =
+      if i >= cnt then s
+      else
+        let (lnm, slot, _) =
+          match cs_cur s with
+          | FnSt _ _ _ locs _ _ _ _ -> list_nth locs i
+        in
+        let (ni, s1) = cs_add_name lnm s in
+        let s2 = cs_emit_s OpGetLocal slot 0 s1 in
+        let s3 = cs_emit_s OpDefGlobal ni 0 s2 in
+        def_globals (i + 1) s3
+    in
+    let st3 = def_globals mark st2 in
+    cs_pop_locals_to mark st3
+
+let binop_to_bop op =
+  match op with
+  | BAddInt -> OpAddInt
+  | BSubInt -> OpSubInt
+  | BMulInt -> OpMulInt
+  | BDivInt -> OpDivInt
+  | BModInt -> OpModInt
+  | BAddFloat -> OpAddFloat
+  | BSubFloat -> OpSubFloat
+  | BMulFloat -> OpMulFloat
+  | BDivFloat -> OpDivFloat
+  | BBitAnd -> OpBitAnd
+  | BBitOr -> OpBitOr
+  | BBitXor -> OpBitXor
+  | BShl -> OpShl
+  | BShr -> OpShr
+  | BConcat -> OpConcatStr
+  | BCons -> OpCons
+  | BEq -> OpEq
+  | BNeq -> OpNeq
+  | BLt -> OpLt
+  | BLe -> OpLe
+  | BGt -> OpGt
+  | BGe -> OpGe
+  | _ -> OpAddInt
+
+let rec compile_bexpr expr tail_pos st =
+  match expr with
+  | EInt x ->
+      let (ci, st1) = cs_add_const (BCInt x) st in
+      cs_emit_s OpConst ci 0 st1
+  | EFloat x ->
+      let (ci, st1) = cs_add_const (BCFloat x) st in
+      cs_emit_s OpConst ci 0 st1
+  | EBool b ->
+      let (ci, st1) = cs_add_const (BCBool b) st in
+      cs_emit_s OpConst ci 0 st1
+  | EString s ->
+      let (ci, st1) = cs_add_const (BCString s) st in
+      cs_emit_s OpConst ci 0 st1
+  | EUnit ->
+      let (ci, st1) = cs_add_const BCUnit st in
+      cs_emit_s OpConst ci 0 st1
+  | EVar nm ->
+      let loc = resolve_local_in (cs_cur st) nm in
+      if loc >= 0 then cs_emit_s OpGetLocal loc 0 st
+      else
+        let (uv, fns1) =
+          match st with
+          | CSt fns _ _ _ -> resolve_upvalue_stack fns nm
+        in
+        if uv >= 0 then
+          let st1 =
+            match st with
+            | CSt _ protos ctors nt -> CSt fns1 protos ctors nt
+          in
+          cs_emit_s OpGetUpvalue uv 0 st1
+        else
+          let (ni, st1) = cs_add_name nm st in
+          cs_emit_s OpGetGlobal ni 0 st1
+  | ECtor cname ->
+      (match cs_find_ctor cname st with
+      | None -> panic ("bootstrap codegen error: unknown ctor '" ++ cname ++ "'")
+      | Some (_, tag, arity) ->
+          if arity == 0 then
+            let (ni, st1) = cs_add_name cname st in
+            cs_emit_s OpMakeAdt tag ni st1
+          else
+            let (ni, st1) = cs_add_name cname st in
+            cs_emit_s OpGetGlobal ni 0 st1)
+  | ETuple elems ->
+      let st1 = core.list_foldl (fn s e -> compile_bexpr e false s) st elems in
+      cs_emit_s OpMakeTuple (list_len elems) 0 st1
+  | EList elems ->
+      let st1 = core.list_foldl (fn s e -> compile_bexpr e false s) st elems in
+      cs_emit_s OpMakeList (list_len elems) 0 st1
+  | EUnary op e ->
+      (match op with
+      | UAddrOf ->
+          (match e with
+          | EVar nm ->
+              let loc = resolve_local_in (cs_cur st) nm in
+              if loc >= 0 then
+                let f1 = fn_mark_captured (cs_cur st) loc in
+                cs_emit_s OpAddrOfLocal loc 0 (cs_set_cur f1 st)
+              else
+                let (uv, fns1) =
+                  match st with
+                  | CSt fns _ _ _ -> resolve_upvalue_stack fns nm
+                in
+                if uv >= 0 then
+                  let st1 = match st with | CSt _ protos ctors nt -> CSt fns1 protos ctors nt in
+                  cs_emit_s OpAddrOfLocal (-1) 0 (cs_emit_s OpGetUpvalue uv 0 st1)
+                else
+                  let (ni, st1) = cs_add_name nm st in
+                  cs_emit_s OpAddrOfGlobal ni 0 st1
+          | _ -> cs_emit_s OpAddrOfLocal (-1) 0 (compile_bexpr e false st))
+      | _ ->
+          let st1 = compile_bexpr e false st in
+          let uop =
+            match op with
+            | UNegInt -> OpNegInt
+            | UNegFloat -> OpNegFloat
+            | UBitNot -> OpBitNot
+            | ULogicalNot -> OpLogicalNot
+            | UDeref -> OpDerefPtr
+            | UAddrOf -> OpAddrOfLocal
+          in
+          cs_emit_s uop 0 0 st1)
+  | EBin op l r ->
+      (match op with
+      | BAnd ->
+          let st1 = compile_bexpr l false st in
+          let (fj, st2) = cs_emit OpJumpIfFalse 0 0 st1 in
+          let st3 = cs_emit_s OpPop 0 0 st2 in
+          let st4 = compile_bexpr r tail_pos st3 in
+          let (ej, st5) = cs_emit OpJump 0 0 st4 in
+          cs_patch_jump ej (cs_patch_jump fj st5)
+      | BOr ->
+          let st1 = compile_bexpr l false st in
+          let (tj, st2) = cs_emit OpJumpIfTrue 0 0 st1 in
+          let st3 = cs_emit_s OpPop 0 0 st2 in
+          let st4 = compile_bexpr r tail_pos st3 in
+          let (ej, st5) = cs_emit OpJump 0 0 st4 in
+          cs_patch_jump ej (cs_patch_jump tj st5)
+      | BSeq ->
+          let st1 = compile_bexpr l false st in
+          let st2 = cs_emit_s OpPop 0 0 st1 in
+          compile_bexpr r tail_pos st2
+      | BPipe ->
+          let st1 = compile_bexpr r false st in
+          let st2 = compile_bexpr l false st1 in
+          cs_emit_s (if tail_pos then OpTailCall else OpCall) 1 0 st2
+      | _ ->
+          let st1 = compile_bexpr l false st in
+          let st2 = compile_bexpr r false st1 in
+          cs_emit_s (binop_to_bop op) 0 0 st2)
+  | EIf c t e ->
+      let st1 = compile_bexpr c false st in
+      let (else_j, st2) = cs_emit OpJumpIfFalse 0 0 st1 in
+      let st3 = cs_emit_s OpPop 0 0 st2 in
+      let st4 = compile_bexpr t tail_pos st3 in
+      let (end_j, st5) = cs_emit OpJump 0 0 st4 in
+      let st6 = cs_patch_jump else_j st5 in
+      let st7 = cs_emit_s OpPop 0 0 st6 in
+      let st8 = compile_bexpr e tail_pos st7 in
+      cs_patch_jump end_j st8
+  | ELet is_rec pat val_e body ->
+      let mark = cs_local_count st in
+      let st1 =
+        if is_rec then
+          let nm = match pat with | PVar s -> s | _ -> panic "let rec requires var" in
+          let (slot, s1) = cs_alloc_local nm st in
+          let (ui, s2) = cs_add_const BCUnit s1 in
+          let s3 = cs_emit_s OpConst ui 0 s2 in
+          let s4 = cs_emit_s OpSetLocal slot 0 s3 in
+          let s5 = compile_bexpr val_e false s4 in
+          cs_emit_s OpSetLocal slot 0 s5
+        else
+          let s1 = compile_bexpr val_e false st in
+          compile_pat_bind pat false s1
+      in
+      let st2 = compile_bexpr body tail_pos st1 in
+      cs_pop_locals_to mark st2
+  | EFn pat body ->
+      let st1 = cs_begin_fn "lambda" 1 st in
+      let (pslot, st2) = cs_alloc_local "$arg" st1 in
+      let st3 =
+        match pat with
+        | PVar nm -> cs_rename_local pslot nm st2
+        | PWild -> st2
+        | _ ->
+            let s1 = cs_emit_s OpGetLocal pslot 0 st2 in
+            compile_pat_bind pat false s1
+      in
+      let st4 = compile_bexpr body true st3 in
+      let st5 = cs_emit_s OpReturn 0 0 st4 in
+      let (pid, st6) = cs_end_fn st5 in
+      let (ci, st7) = cs_add_const (BCProto pid) st6 in
+      cs_emit_s OpMakeClosure ci 0 st7
+  | EApp f a ->
+      let st1 = compile_bexpr f false st in
+      let st2 = compile_bexpr a false st1 in
+      cs_emit_s (if tail_pos then OpTailCall else OpCall) 1 0 st2
+  | EMatch scrut arms ->
+      let st1 = compile_bexpr scrut false st in
+      let scrut_mark = cs_local_count st1 in
+      let (scrut_slot, st2) = cs_alloc_local "$match" st1 in
+      let st3 = cs_emit_s OpSetLocal scrut_slot 0 st2 in
+      let rec go i end_js s =
+        if i >= list_len arms then
+          let s1 = cs_emit_s OpMatchFail 0 0 s in
+          let s2 = core.list_foldl (fn sx j -> cs_patch_jump j sx) s1 end_js in
+          cs_pop_locals_to scrut_mark s2
+        else
+          let (p, b) = list_nth arms i in
+          let arm_mark = cs_local_count s in
+          let s1 = cs_emit_s OpGetLocal scrut_slot 0 s in
+          let (fails, s2) = compile_pat_match p [] s1 in
+          let s3 = compile_bexpr b tail_pos s2 in
+          let s4 = cs_pop_locals_to arm_mark s3 in
+          let (ej, s5) = cs_emit OpJump 0 0 s4 in
+          let s6 = core.list_foldl (fn sx j -> cs_patch_jump j sx) s5 fails in
+          let s7 = cs_pop_locals_to arm_mark s6 in
+          go (i + 1) (list_snoc end_js ej) s7
+      in
+      go 0 [] st3
+  | EAnnot e _ -> compile_bexpr e tail_pos st
+  | EStructLit sname fields ->
+      let (tni, st1) = cs_add_name sname st in
+      let st2 =
+        core.list_foldl (fn s kv ->
+          match kv with
+          | (fnm, fv) ->
+              let (ki, s1) = cs_add_const (BCString fnm) s in
+              let s2 = cs_emit_s OpConst ki 0 s1 in
+              compile_bexpr fv false s2
+        ) st1 fields
+      in
+      cs_emit_s OpMakeStruct tni (list_len fields) st2
+  | EFieldGet obj fld ->
+      let st1 = compile_bexpr obj false st in
+      let (fi, st2) = cs_add_name fld st1 in
+      cs_emit_s OpGetField fi 0 st2
+  | EFieldSet obj fld val_e ->
+      let st1 = compile_bexpr obj false st in
+      let st2 = compile_bexpr val_e false st1 in
+      let (fi, st3) = cs_add_name fld st2 in
+      cs_emit_s OpSetField fi 0 st3
+  | ENew val_e ->
+      cs_emit_s OpNewHeap 0 0 (compile_bexpr val_e false st)
+  | EClose ptr_e ->
+      cs_emit_s OpCloseHeap 0 0 (compile_bexpr ptr_e false st)
+  | EScopeDefer act body ->
+      let mark = cs_local_count st in
+      let st1 = compile_bexpr body false st in
+      let (rslot, st2) = cs_alloc_local "$defer_res" st1 in
+      let st3 = cs_emit_s OpSetLocal rslot 0 st2 in
+      let st4 = compile_bexpr act false st3 in
+      let st5 = cs_emit_s OpPop 0 0 st4 in
+      let st6 = cs_emit_s OpGetLocal rslot 0 st5 in
+      cs_pop_locals_to mark st6
+  | EDerefSet ptr_e val_e ->
+      let st1 = compile_bexpr ptr_e false st in
+      let st2 = compile_bexpr val_e false st1 in
+      cs_emit_s OpSetDeref 0 0 st2
+  | EPtrFieldGet ptr_e fld ->
+      let st1 = compile_bexpr ptr_e false st in
+      let (fi, st2) = cs_add_name fld st1 in
+      cs_emit_s OpGetPtrField fi 0 st2
+  | EPtrFieldSet ptr_e fld val_e ->
+      let st1 = compile_bexpr ptr_e false st in
+      let st2 = compile_bexpr val_e false st1 in
+      let (fi, st3) = cs_add_name fld st2 in
+      cs_emit_s OpSetPtrField fi 0 st3
+
+let compile_bstmt stmt keep_val st =
+  match stmt with
+  | SType _ cdefs ->
+      let st1 = cs_register_type cdefs st in
+      if keep_val then
+        let (ci, st2) = cs_add_const BCUnit st1 in
+        cs_emit_s OpConst ci 0 st2
+      else st1
+  | SStruct _ _ ->
+      if keep_val then
+        let (ci, st1) = cs_add_const BCUnit st in
+        cs_emit_s OpConst ci 0 st1
+      else st
+  | SLet is_rec pat val_e ->
+      let st1 =
+        if is_rec then
+          let nm = match pat with | PVar s -> s | _ -> panic "let rec requires var" in
+          let (ui, s1) = cs_add_const BCUnit st in
+          let (ni, s2) = cs_add_name nm s1 in
+          let s3 = cs_emit_s OpConst ui 0 s2 in
+          cs_emit_s OpDefGlobal ni 0 s3
+        else st
+      in
+      let st2 = compile_bexpr val_e false st1 in
+      let st3 = if keep_val then cs_emit_s OpDup 0 0 st2 else st2 in
+      compile_pat_bind pat true st3
+  | SExpr e ->
+      let st1 = compile_bexpr e false st in
+      if keep_val then st1 else cs_emit_s OpPop 0 0 st1
+
+let compile_program_to_bc stmts =
+  let init_st = CSt [] [] [] 0 in
+  let st1 = cs_begin_fn "<bootstrap>" 0 init_st in
+  let n = list_len stmts in
+  let st2 =
+    if n == 0 then
+      let (ui, s1) = cs_add_const BCUnit st1 in
+      cs_emit_s OpConst ui 0 s1
+    else
+      let rec go i s =
+        if i >= n then s
+        else go (i + 1) (compile_bstmt (list_nth stmts i) (i + 1 == n) s)
+      in
+      go 0 st1
+  in
+  let st3 = cs_emit_s OpReturn 0 0 st2 in
+  let (entry_id, st4) = cs_end_fn st3 in
+  match st4 with
+  | CSt _ protos ctors _ -> BProg ctors protos entry_id
