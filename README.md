@@ -1,4 +1,4 @@
-# Argon (CommonML Compiler & VM)
+# CommonML Compiler 
 
 CommonML (`cml`) is a statically typed, Hindley-Milner functional programming language implemented in C++20 with algebraic data types, pattern matching, hygienic AST macros (`quote` / `$`), a bytecode compiler, a stack-based VM with closures and tail-call optimization, and an interactive REPL.
 
